@@ -1,0 +1,9 @@
+[plugin_runtime]
+enabled = true
+auto_start = true
+
+[workbench_installer]
+# 默认安装目录(留空 = %LOCALAPPDATA%\Programs\NEKOWorkshop)
+target = ""
+# 便携包下载地址(留空 = 官方 GitHub Release 最新便携包)
+url = ""
