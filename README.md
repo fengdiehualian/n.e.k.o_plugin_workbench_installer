@@ -8,6 +8,27 @@
 - 本插件仓库:https://github.com/fengdiehualian/n.e.k.o_plugin_workbench_installer
 - 「N.E.K.O. 插件工坊」(本插件安装的 Agent 工作台)源码:https://github.com/fengdiehualian/neko-plugin-workshop
 
+## 怎么用
+
+**先装进 N.E.K.O.(一次性)**:到 [Releases](https://github.com/fengdiehualian/n.e.k.o_plugin_workbench_installer/releases/latest) 下载 `workbench_installer.neko-plugin`,在 N.E.K.O. 插件管理里安装并启动。
+
+**然后对猫娘说话即可**(入口已注册为 LLM 工具,说人话就能触发):
+
+| 你说 | 它做什么 |
+|---|---|
+| 「**安装工作台**」 | 下载官方便携包,解压安装到 `%LOCALAPPDATA%\Programs\NEKOWorkshop`,建桌面快捷方式并启动 |
+| 「**启动工作台**」 | 启动工作台;已在运行则返回地址 `http://127.0.0.1:5099` |
+| 「**工作台状态**」 | 报告安装/运行状态与引擎、模型健康情况 |
+
+**常用变体**(说的时候带出来,或让 Agent 传参):
+
+| 你说 / 传参 | 作用 |
+|---|---|
+| 「覆盖重装工作台」(`overwrite=true`) | 覆盖重装;**不带此参数时拒绝覆盖**,防误删 |
+| 「用这个包安装」(`zip=本地 zip 路径`) | 离线安装,不联网 |
+| `url=下载地址` | 自定义便携包下载源(默认官方 Release 最新便携包) |
+| `target=安装目录` | 自定义安装目录(默认 `%LOCALAPPDATA%\Programs\NEKOWorkshop`;系统目录会被拒绝) |
+
 ## 入口(全部双注册为 llm_tool,对话/面板/Agent 都能调)
 
 | 入口 | 作用 | 参数 |
