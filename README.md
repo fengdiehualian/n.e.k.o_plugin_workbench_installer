@@ -3,6 +3,11 @@
 猫娘计划(N.E.K.O.)插件:在 N.E.K.O. 里一键安装「N.E.K.O. 插件工坊」(Agent 工作台)。
 相当于一个「通过猫娘计划插件分发的安装器」——对猫娘说一句「安装工作台」就能把工作台装到这台电脑上。
 
+## 项目地址
+
+- 本插件仓库:https://github.com/fengdiehualian/n.e.k.o_plugin_workbench_installer
+- 「N.E.K.O. 插件工坊」(本插件安装的 Agent 工作台)源码:https://github.com/fengdiehualian/neko-plugin-workshop
+
 ## 入口(全部双注册为 llm_tool,对话/面板/Agent 都能调)
 
 | 入口 | 作用 | 参数 |
