@@ -97,14 +97,16 @@ def _make_httpx_client(timeout, proxy):
     if proxy is None:
         kwargs["trust_env"] = True
     else:
-        kwargs["proxy"] = proxy
-    try:
-        return httpx.AsyncClient(**kwargs)
-    except TypeError:  # 旧版 httpx 用 proxies= 参数
-        kwargs.pop("proxy", None)
-        if proxy:
+        # 按签名选参数名:新版 httpx 用 proxy=,旧版用 proxies=。
+        # 不用 try/except TypeError 兜底——timeout 等无关 TypeError 会被误吞进错误分支
+        import inspect
+
+        params = inspect.signature(httpx.AsyncClient.__init__).parameters
+        if "proxy" in params:
+            kwargs["proxy"] = proxy
+        else:
             kwargs["proxies"] = proxy
-        return httpx.AsyncClient(**kwargs)
+    return httpx.AsyncClient(**kwargs)
 
 
 class InstallParams(BaseModel):
@@ -178,7 +180,9 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
         }
 
     async def _download(self, url: str, dest: str) -> dict:
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        dest_dir = os.path.dirname(dest)
+        if dest_dir:  # 裸文件名时 dirname 为空,makedirs("") 会直接炸
+            os.makedirs(dest_dir, exist_ok=True)
         errors = []
         for proxy in _PROXY_CANDIDATES:
             label = proxy or "direct/env"
@@ -216,8 +220,10 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
             return None
 
     async def _wait_health(self, seconds: float = 25.0):
-        deadline = asyncio.get_event_loop().time() + seconds
-        while asyncio.get_event_loop().time() < deadline:
+        # get_event_loop() 在运行中的协程里已废弃(3.12 起报错),用 get_running_loop()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + seconds
+        while loop.time() < deadline:
             h = await self._health()
             if h is not None:
                 return h
@@ -243,22 +249,29 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
         if os.name != "nt":
             return {"ok": False, "skipped": True, "error": "仅 Windows 支持快捷方式"}
         start_cmd = os.path.join(target, "start.cmd")
-        esc_cmd = start_cmd.replace("'", "''")
-        esc_dir = target.replace("'", "''")
+        # 路径经环境变量传给 PowerShell,不内联进脚本:含单引号/特殊字符的路径
+        # (如 C:\Users\O'Brien\...)不会破坏语法
         ps = (
             "$ws = New-Object -ComObject WScript.Shell; "
             "$desktop = [Environment]::GetFolderPath('Desktop'); "
-            f"$lnk = $ws.CreateShortcut((Join-Path $desktop '{_SHORTCUT_NAME}.lnk')); "
-            f"$lnk.TargetPath = '{esc_cmd}'; "
-            f"$lnk.WorkingDirectory = '{esc_dir}'; "
+            "$lnk = $ws.CreateShortcut((Join-Path $desktop ($env:WB_SC_NAME + '.lnk'))); "
+            "$lnk.TargetPath = $env:WB_SC_TARGET; "
+            "$lnk.WorkingDirectory = $env:WB_SC_DIR; "
             "$lnk.Description = 'N.E.K.O. Plugin Workbench'; "
             "$lnk.Save()"
         )
+        env = {
+            **os.environ,
+            "WB_SC_TARGET": start_cmd,
+            "WB_SC_DIR": target,
+            "WB_SC_NAME": _SHORTCUT_NAME,
+        }
         try:
             r = subprocess.run(
                 ["powershell", "-NoProfile", "-Command", ps],
                 capture_output=True,
                 timeout=30,
+                env=env,
             )
             if r.returncode == 0:
                 return {"ok": True, "name": f"{_SHORTCUT_NAME}.lnk"}
