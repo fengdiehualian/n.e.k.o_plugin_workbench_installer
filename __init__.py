@@ -55,8 +55,14 @@ def _default_target() -> str:
 
 
 def _is_system_target(target: str) -> bool:
-    """拒绝把系统目录当安装/覆盖目标(安全底线)。"""
-    t = os.path.abspath(target).rstrip("\\/").lower()
+    """拒绝把系统目录当安装/覆盖目标(安全底线;跨平台)。"""
+    raw = str(target).strip()
+    # Windows 盘根:任何平台都拒绝(Linux 上 "C:\\..." 只会是笔误,不是合法安装点)
+    if len(raw) in (2, 3) and raw[1] == ":" and raw[0].isalpha() and (
+        len(raw) == 2 or raw[2] in "\\/"
+    ):
+        return True
+    t = os.path.abspath(raw).rstrip("\\/").lower()
     drive = os.environ.get("SystemDrive", "C:").lower()
     if t in (drive, drive + "\\"):
         return True
@@ -66,6 +72,13 @@ def _is_system_target(target: str) -> bool:
         p = (os.environ.get(var) or "").rstrip("\\/").lower()
         if p and (t == p or t.startswith(p + "\\")):
             return True
+    # Unix 系统目录(含裸根):同样拒绝
+    normalized = os.path.abspath(raw).replace("\\", "/").rstrip("/") or "/"
+    if normalized in {
+        "/", "/bin", "/boot", "/dev", "/etc", "/lib", "/lib64",
+        "/proc", "/root", "/sbin", "/sys", "/usr", "/var",
+    }:
+        return True
     return False
 
 

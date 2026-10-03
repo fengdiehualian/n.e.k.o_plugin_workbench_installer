@@ -134,12 +134,14 @@ def test_install_rejects_zip_slip(tmp_path) -> None:
     assert not (tmp_path / "evil.txt").exists()
 
 
-def test_install_refuses_system_target(tmp_path) -> None:
+@pytest.mark.parametrize("sys_target", ["C:\\", "/"])
+def test_install_refuses_system_target(tmp_path, sys_target) -> None:
+    # 系统目标防护跨平台:Windows 盘根与 Unix 裸根都必须拒绝(官方 CI 跑在 Linux)
     mod = _load_module()
     z = _make_zip(tmp_path / "pkg.zip")
     p = _make_plugin(mod, tmp_path)
     res = asyncio.run(
-        p.install(mod.InstallParams(zip=str(z), target="C:\\", launch=False, shortcut=False))
+        p.install(mod.InstallParams(zip=str(z), target=sys_target, launch=False, shortcut=False))
     )
     assert isinstance(res, mod.Err), res
 
