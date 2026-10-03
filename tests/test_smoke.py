@@ -39,7 +39,8 @@ def test_entry_class_declared() -> None:
 
 def _ensure_sdk_on_path() -> bool:
     try:
-        import plugin.sdk  # noqa: F401
+        # 可用性探测:importlib 动态导入,不产生未用导入绑定(官方 CI ruff --ignore-noqa 会查 F401)
+        importlib.import_module("plugin.sdk")
 
         return True
     except Exception:
