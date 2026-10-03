@@ -18,7 +18,6 @@ import shutil
 import subprocess
 import zipfile
 
-from pydantic import BaseModel, Field
 from plugin.sdk.plugin import (
     Err,
     NekoPluginBase,
@@ -29,6 +28,7 @@ from plugin.sdk.plugin import (
     neko_plugin,
     plugin_entry,
 )
+from pydantic import BaseModel, Field
 
 try:
     import httpx
