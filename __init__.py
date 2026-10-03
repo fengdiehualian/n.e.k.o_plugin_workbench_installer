@@ -341,7 +341,9 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
     )
     async def install(self, params: InstallParams, **_):
         target = self._resolve_target(params.target)
-        if _is_system_target(target):
+        # 原始输入与解析后路径都要查:相对的系统目标(如 Linux 上的 "C:\\")
+        # 会被 _resolve_target 先拼成绝对路径,只查解析值会漏
+        if _is_system_target(params.target or "") or _is_system_target(target):
             return Err(SdkError(f"拒绝安装到系统目录: {target}"))
         info = await asyncio.to_thread(self._probe_install, target)
         if info["installed"] and not params.overwrite:
