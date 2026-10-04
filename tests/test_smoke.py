@@ -72,6 +72,9 @@ def _make_plugin(mod, tmp_path):
     cache, data = tmp_path / "cache", tmp_path / "data"
     p.cache_path = lambda *parts: cache.joinpath(*parts)  # 离线隔离,不碰真实缓存目录
     p.data_path = lambda *parts: data.joinpath(*parts)
+    # 全程不触网:健康探测打桩固定 None(否则会真请求 127.0.0.1:5099,
+    # CI 上端口被占时 status 会误报 running,测试不稳定)
+    p._health = mock.AsyncMock(return_value=None)
     return p
 
 

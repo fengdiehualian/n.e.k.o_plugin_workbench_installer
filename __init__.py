@@ -32,7 +32,7 @@ from pydantic import BaseModel, Field
 
 try:
     import httpx
-except Exception:  # httpx 缺失时自动降级到标准库实现
+except ImportError:  # 仅缺包时降级到标准库实现;httpx 自身的其他异常必须冒出来,不能静默吞
     httpx = None
 
 _PLUGIN_ID = "workbench_installer"
