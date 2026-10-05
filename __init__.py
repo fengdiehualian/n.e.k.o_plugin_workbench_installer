@@ -1,13 +1,14 @@
-"""猫娘计划(N.E.K.O.)插件:Agent 工作台安装器 —— 入口垫片
+"""猫娘计划(N.E.K.O.)插件:Agent 工作台安装器 —— 包根入口
 
-实现代码位于 plugin/plugins/workbench_installer/(与 entry 的包路径同形)。
-entry = "plugin.plugins.workbench_installer:WorkbenchInstallerPlugin" 里的
-plugin.plugins.<id> 是**安装/挂载时**由 SDK 把插件包根注册成的运行时 Python 包;
-本文件是包根入口,负责把嵌套实现里的类再导出给宿主。
+布局说明(评审 B-2 与官方校验的平衡点):
+- 全部实现体在 plugin/plugins/workbench_installer/(与 entry 包路径同形);
+- 本文件保留官方 check --market-release 静态校验强制要求的入口声明 ——
+  entry 类必须以 @neko_plugin 装饰、继承 NekoPluginBase、并定义 startup/shutdown,
+  否则校验直接拒绝(实测原文:"plugin.entry class 'WorkbenchInstallerPlugin'
+  must be decorated with @neko_plugin"等);此处只做声明与委托,无业务逻辑。
 
 注意:本包内的 plugin/ 目录会遮蔽 SDK 的顶层 plugin 包(从插件根以 python -m
-运行测试/工具时必现),因此下面加载实现前会临时把插件根移出 sys.path,
-确保实现里的 `from plugin.sdk...` 命中 SDK 而不是本包的 plugin/。
+运行测试/工具时必现),加载实现前会临时把插件根移出 sys.path。
 """
 import importlib.util as _ilu
 import sys as _sys
@@ -18,6 +19,8 @@ _impl_path = _local_root / "plugin" / "plugins" / "workbench_installer" / "__ini
 _spec = _ilu.spec_from_file_location("workbench_installer_impl", _impl_path)
 if _spec is None or _spec.loader is None:  # pragma: no cover - 文件恒存在
     raise ImportError(f"无法加载实现模块: {_impl_path}")
+
+_impl_mod = _ilu.module_from_spec(_spec)
 
 
 def _load_impl():
@@ -38,14 +41,30 @@ def _load_impl():
         _sys.path[:] = saved
 
 
-_impl_mod = _ilu.module_from_spec(_spec)
 _load_impl()
 
-WorkbenchInstallerPlugin = _impl_mod.WorkbenchInstallerPlugin
+# SDK 符号经实现模块转取(其导入过程已受防遮蔽保护),供下方官方入口声明使用
+NekoPluginBase = _impl_mod.NekoPluginBase
+neko_plugin = _impl_mod.neko_plugin
+lifecycle = _impl_mod.lifecycle
+
 InstallParams = _impl_mod.InstallParams
-# SDK 结果类型一并转发(入口测试与调用方按 mod.Ok / mod.Err 判定返回)
 Ok = _impl_mod.Ok
 Err = _impl_mod.Err
 SdkError = _impl_mod.SdkError
+
+
+@neko_plugin
+class WorkbenchInstallerPlugin(_impl_mod.WorkbenchInstallerPlugin, NekoPluginBase):
+    """入口类(官方静态校验要求声明在包根);实现继承自嵌套实现,无逻辑分支。"""
+
+    @lifecycle(id="startup")
+    async def startup(self, **kw):
+        return await super().startup(**kw)
+
+    @lifecycle(id="shutdown")
+    async def shutdown(self, **kw):
+        return await super().shutdown(**kw)
+
 
 __all__ = ["WorkbenchInstallerPlugin", "InstallParams", "Ok", "Err", "SdkError"]
