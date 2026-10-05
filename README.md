@@ -10,7 +10,9 @@
 
 ## 怎么用
 
-**先装进 N.E.K.O.(一次性)**:到 [Releases](https://github.com/fengdiehualian/n.e.k.o_plugin_workbench_installer/releases/latest) 下载 `workbench_installer.neko-plugin`,在 N.E.K.O. 插件管理里安装并启动。
+**先装进 N.E.K.O.(一次性)**:到 [Releases](https://github.com/fengdiehualian/n.e.k.o_plugin_workbench_installer/releases/latest) 下载 `workbench_installer.neko-plugin`,在 N.E.K.O. 插件管理里安装。
+
+> ⚠️ **安装后请手动启动本插件**(插件管理里点「启动」):按代码评审要求已移除 `auto_start`,因此每次猫娘启动后都需要手动启动一次,下面的口令才会生效。
 
 **然后对猫娘说话即可**(入口已注册为 LLM 工具,说人话就能触发):
 
@@ -38,6 +40,12 @@
 | `launch` | 启动工作台;已在运行则返回地址 | `target`(同上) |
 
 工作台访问地址:`http://127.0.0.1:5099`
+
+## 目录布局与 entry
+
+实现代码在 `plugin/plugins/workbench_installer/`,与 `entry = "plugin.plugins.workbench_installer:WorkbenchInstallerPlugin"` 的包路径同形;仓库根的 `__init__.py` 是入口垫片,把实现类再导出给宿主。
+
+说明:`plugin.plugins.<id>` 是**安装/挂载时**由 SDK 把插件包根注册成的运行时 Python 包(官方 CI 的 `Mount plugin into N.E.K.O tree` 与引擎安装器都会生成该路径),它不是仓库内的相对路径 —— 这也是全部市场插件的公共约定。加载链:宿主按 entry 导入包根(垫片)→ 垫片载入嵌套实现 → 拿到 `WorkbenchInstallerPlugin`。
 
 ## 安全设计
 

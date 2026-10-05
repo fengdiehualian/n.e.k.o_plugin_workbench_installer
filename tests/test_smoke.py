@@ -29,9 +29,14 @@ def test_plugin_manifest_exists() -> None:
 
 
 def test_entry_class_declared() -> None:
-    source = (ROOT / "__init__.py").read_text(encoding="utf-8")
+    # 实现位于 plugin/plugins/workbench_installer/(与 entry 包路径同形)
+    impl = ROOT / "plugin" / "plugins" / "workbench_installer" / "__init__.py"
+    source = impl.read_text(encoding="utf-8")
     assert "@neko_plugin" in source
     assert "class WorkbenchInstallerPlugin(NekoPluginBase)" in source
+    # 根 __init__.py 是入口垫片:必须把实现类再导出(挂载后 entry 从包根取类)
+    shim = (ROOT / "__init__.py").read_text(encoding="utf-8")
+    assert "WorkbenchInstallerPlugin" in shim
 
 
 # ---------- 运行时(入口真实逻辑)----------
