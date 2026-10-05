@@ -12,6 +12,10 @@
 
 from __future__ import annotations
 
+# isort: off
+# 说明:官方两条门禁(CI 的 plugin-repo 形状与 publish 的 cwd=. 形状)对 plugin.sdk 的
+# first/third-party 归类相反,同一排序无法同时满足 —— 冻结本块,双方一致放行
+
 import asyncio
 import os
 import shutil
@@ -29,6 +33,8 @@ from plugin.sdk.plugin import (
     plugin_entry,
 )
 from pydantic import BaseModel, Field
+
+# isort: on
 
 try:
     import httpx
