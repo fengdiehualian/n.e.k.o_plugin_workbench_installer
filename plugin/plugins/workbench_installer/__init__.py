@@ -136,7 +136,10 @@ class InstallParams(BaseModel):
     url: str = Field("", description="下载地址;留空=官方 Release 最新便携包")
     launch: bool = Field(True, description="安装完成后是否立刻启动")
     shortcut: bool = Field(True, description="是否创建桌面快捷方式")
-    overwrite: bool = Field(False, description="目标已安装时是否覆盖重装(默认拒绝覆盖)")
+    overwrite: bool = Field(
+        False,
+        description="目标已安装时是否覆盖重装(默认拒绝覆盖;覆盖只替换工作台程序文件,保留 runtime 配置与 workspace 用户项目)",
+    )
 
 
 @neko_plugin
@@ -255,9 +258,9 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
             return {"ok": False, "error": "未找到 start.cmd,该目录不是工作台安装目录"}
         kwargs = {}
         if os.name == "nt":
-            kwargs["creationflags"] = (
-                subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_CONSOLE
-            )
+            # DETACHED_PROCESS 与 CREATE_NEW_CONSOLE 互斥:同时使用 CreateProcess 报
+            # WinError 87(参数错误),启动会静默失败 —— 只用 CREATE_NEW_CONSOLE(等效双击)
+            kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
         try:
             proc = subprocess.Popen(["cmd", "/c", str(start_cmd)], cwd=target, **kwargs)
             return {"ok": True, "pid": proc.pid}
@@ -380,10 +383,22 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
             zip_path = got["path"]
             source = f"{source} ({got['bytes']} bytes, via {got['via']})"
 
-        # 覆盖安装:仅当目标确实是工作台目录时才清空重装
+        # 覆盖安装:仅当目标确实是工作台目录时清理**工作台自有文件**后重装。
+        # runtime(API 配置/会话)与 workspace(用户生成的插件项目)是用户数据,
+        # 必须保留 —— 早期实现直接 rmtree(target) 会把用户项目一并删掉(实测事故)
         if info["installed"] and params.overwrite:
             try:
-                shutil.rmtree(target, ignore_errors=True)
+                for entry in os.listdir(target):
+                    if entry in ("runtime", "workspace"):
+                        continue
+                    p = os.path.join(target, entry)
+                    if os.path.isdir(p):
+                        shutil.rmtree(p, ignore_errors=True)
+                    else:
+                        try:
+                            os.unlink(p)
+                        except OSError:
+                            pass
             except Exception as e:
                 return Err(SdkError(f"清理旧安装失败: {e}"))
         elif os.path.isdir(target) and not info["installed"] and os.listdir(target):

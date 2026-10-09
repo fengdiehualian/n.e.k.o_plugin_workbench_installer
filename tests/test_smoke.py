@@ -161,3 +161,56 @@ def test_launch_without_start_cmd_fails(tmp_path) -> None:
     p = _make_plugin(mod, tmp_path)
     res = asyncio.run(p.launch(target=str(empty)))
     assert isinstance(res, mod.Err), res
+
+
+def test_overwrite_preserves_runtime_and_workspace(tmp_path) -> None:
+    # 覆盖重装只替换工作台程序文件:runtime(API/会话)与 workspace(用户项目)必须保留
+    mod = _load_module()
+    z = _make_zip(tmp_path / "pkg.zip")
+    target = tmp_path / "wb"
+    p = _make_plugin(mod, tmp_path)
+    params = dict(zip=str(z), target=str(target), launch=False, shortcut=False)
+    res1 = asyncio.run(p.install(mod.InstallParams(**params)))
+    assert _val(res1).get("ok") is True
+
+    user_file = target / "workspace" / "myproject.txt"
+    user_file.parent.mkdir(parents=True)
+    user_file.write_text("precious", encoding="utf-8")
+    rt_file = target / "runtime" / "config.json"
+    rt_file.parent.mkdir(parents=True)
+    rt_file.write_text("{}", encoding="utf-8")
+
+    res2 = asyncio.run(p.install(mod.InstallParams(**{**params, "overwrite": True})))
+    v = _val(res2)
+    assert v.get("ok") is True, v
+    assert user_file.read_text(encoding="utf-8") == "precious"  # 用户项目不许删
+    assert rt_file.is_file()  # 用户配置不许删
+    assert (target / "start.cmd").is_file()  # 程序件已重装
+
+
+@pytest.mark.skipif(os.name != "nt", reason="creationflags 仅 Windows")
+def test_spawn_uses_compatible_creation_flags(tmp_path, monkeypatch) -> None:
+    # DETACHED_PROCESS 与 CREATE_NEW_CONSOLE 互斥,同用会 WinError 87 启动静默失败
+    import subprocess as sp
+
+    mod = _load_module()
+    p = _make_plugin(mod, tmp_path)
+    target = tmp_path / "wbdir"
+    target.mkdir()
+    (target / "start.cmd").write_text("@echo off", encoding="utf-8")
+
+    captured = {}
+
+    class _FakeProc:
+        pid = 12345
+
+    def fake_popen(cmd, **kw):
+        captured.update(kw)
+        return _FakeProc()
+
+    monkeypatch.setattr(sp, "Popen", fake_popen)
+    res = p._spawn(str(target))
+    assert res.get("ok") is True, res
+    flags = captured.get("creationflags", 0)
+    assert flags == sp.CREATE_NEW_CONSOLE
+    assert not (flags & sp.DETACHED_PROCESS)
