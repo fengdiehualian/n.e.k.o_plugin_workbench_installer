@@ -130,6 +130,48 @@ def test_install_local_zip_then_refuses_overwrite_then_overwrites(tmp_path) -> N
     assert (target / "start.cmd").is_file()
 
 
+def test_install_exe_requires_default_target(tmp_path) -> None:
+    # 安装版 exe 内部固定装到 %LOCALAPPDATA%\Programs\NEKOWorkshop:
+    # 传自定义目录必须明确拒绝,而不是静默装到别处
+    mod = _load_module()
+    exe = tmp_path / "setup.exe"
+    exe.write_bytes(b"MZ-stub")
+    p = _make_plugin(mod, tmp_path)
+    res = asyncio.run(
+        p.install(
+            mod.InstallParams(
+                zip=str(exe), target=str(tmp_path / "custom"), launch=False, shortcut=False
+            )
+        )
+    )
+    assert isinstance(res, mod.Err), res
+    assert "默认目录" in str(res.error)
+
+
+def test_safe_extract_rejects_zip_bomb(tmp_path, monkeypatch) -> None:
+    mod = _load_module()
+    z = tmp_path / "bomb.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        for i in range(3):
+            zf.writestr(f"f{i}.txt", "x")
+    # 实现体在垫片内的 _impl_mod(垫片只转出公开符号,私有常量从实现模块取)
+    impl = mod._impl_mod
+    monkeypatch.setattr(impl, "_MAX_ZIP_FILES", 2)
+    with pytest.raises(ValueError, match="文件数"):
+        impl._safe_extract(str(z), str(tmp_path / "out"))
+
+
+def test_safe_extract_rejects_oversize(tmp_path, monkeypatch) -> None:
+    mod = _load_module()
+    z = tmp_path / "big.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("big.bin", "x" * 100)
+    impl = mod._impl_mod
+    monkeypatch.setattr(impl, "_MAX_ZIP_BYTES", 10)
+    with pytest.raises(ValueError, match="体积"):
+        impl._safe_extract(str(z), str(tmp_path / "out"))
+
+
 def test_install_rejects_zip_slip(tmp_path) -> None:
     mod = _load_module()
     z = _make_zip(tmp_path / "evil.zip", extra={"../evil.txt": "pwn"})
