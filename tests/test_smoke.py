@@ -1,6 +1,7 @@
 """workbench_installer 冒烟测试:静态结构 + install/status/launch 三入口真实逻辑。
 
-运行时用例完全离线(本地 zip、临时目录、无网络);需要 N.E.K.O SDK 在路径上
+安装只走官方安装版 exe(exe 来源),因此运行时用例用本地假 exe + 打桩的安装器,
+全程离线、不触网、不写真实安装目录。需要 N.E.K.O SDK 在路径上
 (python -m pytest tests/ 于 N.E.K.O 环境,或设 WB_NEKO_REPO 指向 N.E.K.O 源码根),
 SDK 不在时自动跳过运行时用例,静态用例照常执行。
 """
@@ -8,7 +9,6 @@ import asyncio
 import importlib.util
 import os
 import sys
-import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -26,6 +26,8 @@ def test_plugin_manifest_exists() -> None:
     text = manifest.read_text(encoding="utf-8")
     assert 'id = "workbench_installer"' in text
     assert 'entry = "plugin.plugins.workbench_installer:WorkbenchInstallerPlugin"' in text
+    # 只支持安装版:manifest 不应再把便携 zip 写进默认配置
+    assert "Portable.zip" not in text
 
 
 def test_entry_class_declared() -> None:
@@ -37,6 +39,14 @@ def test_entry_class_declared() -> None:
     # 根 __init__.py 是入口垫片:必须把实现类再导出(挂载后 entry 从包根取类)
     shim = (ROOT / "__init__.py").read_text(encoding="utf-8")
     assert "WorkbenchInstallerPlugin" in shim
+
+
+def test_no_zip_extraction_anymore() -> None:
+    # 明确回归:不再做本地解压安装
+    impl = ROOT / "plugin" / "plugins" / "workbench_installer" / "__init__.py"
+    source = impl.read_text(encoding="utf-8")
+    assert "zipfile" not in source
+    assert "extractall" not in source
 
 
 # ---------- 运行时(入口真实逻辑)----------
@@ -83,18 +93,26 @@ def _make_plugin(mod, tmp_path):
     return p
 
 
-def _make_zip(path: Path, extra: dict | None = None) -> Path:
-    with zipfile.ZipFile(path, "w") as z:
-        z.writestr("start.cmd", "@echo off\r\necho wb\r\n")
-        z.writestr("README.md", "workbench stub")
-        z.writestr("wb-studio.mjs", "// stub")
-        for name, content in (extra or {}).items():
-            z.writestr(name, content)
-    return path
+def _fake_setup(target: Path):
+    """假安装器:像官方 --silent 一样把程序文件落到目标目录,并保留用户数据目录。"""
+
+    def _run(exe_path: str) -> dict:
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "start.cmd").write_text("@echo off\r\necho wb\r\n", encoding="utf-8")
+        (target / "wb-studio.mjs").write_text("// stub", encoding="utf-8")
+        (target / "runtime").mkdir(exist_ok=True)
+        (target / "workspace").mkdir(exist_ok=True)
+        return {"ok": True, "returncode": 0}
+
+    return _run
 
 
 def _val(res):
     return res.value if hasattr(res, "value") else res
+
+
+def _bind_default_target(mod, target: Path, monkeypatch) -> None:
+    monkeypatch.setattr(mod._impl_mod, "_default_target", lambda: str(target))
 
 
 def test_status_not_installed(tmp_path) -> None:
@@ -105,12 +123,15 @@ def test_status_not_installed(tmp_path) -> None:
     assert not v.get("installed"), v
 
 
-def test_install_local_zip_then_refuses_overwrite_then_overwrites(tmp_path) -> None:
+def test_install_exe_then_refuses_overwrite_then_overwrites(tmp_path, monkeypatch) -> None:
     mod = _load_module()
-    z = _make_zip(tmp_path / "pkg.zip")
     target = tmp_path / "wb"
+    _bind_default_target(mod, target, monkeypatch)
+    exe = tmp_path / "setup.exe"
+    exe.write_bytes(b"MZ-stub")
     p = _make_plugin(mod, tmp_path)
-    params = dict(zip=str(z), target=str(target), launch=False, shortcut=False)
+    p._run_setup_exe = _fake_setup(target)
+    params = dict(exe=str(exe), launch=False, shortcut=False)
 
     res = asyncio.run(p.install(mod.InstallParams(**params)))
     v = _val(res)
@@ -130,70 +151,52 @@ def test_install_local_zip_then_refuses_overwrite_then_overwrites(tmp_path) -> N
     assert (target / "start.cmd").is_file()
 
 
-def test_install_exe_requires_default_target(tmp_path) -> None:
-    # 安装版 exe 内部固定装到 %LOCALAPPDATA%\Programs\NEKOWorkshop:
-    # 传自定义目录必须明确拒绝,而不是静默装到别处
+def test_install_rejects_non_exe(tmp_path) -> None:
+    # 只认官方安装版:传 zip/其它格式必须明确拒绝,不做本地解压
     mod = _load_module()
+    pkg = tmp_path / "pkg.zip"
+    pkg.write_bytes(b"PK-stub")
+    p = _make_plugin(mod, tmp_path)
+    res = asyncio.run(p.install(mod.InstallParams(exe=str(pkg), launch=False, shortcut=False)))
+    assert isinstance(res, mod.Err), res
+    assert "exe" in str(res.error).lower()
+
+
+def test_install_missing_local_exe(tmp_path) -> None:
+    mod = _load_module()
+    p = _make_plugin(mod, tmp_path)
+    res = asyncio.run(
+        p.install(mod.InstallParams(exe=str(tmp_path / "nope.exe"), launch=False, shortcut=False))
+    )
+    assert isinstance(res, mod.Err), res
+    assert "不存在" in str(res.error)
+
+
+def test_install_reports_setup_failure(tmp_path, monkeypatch) -> None:
+    mod = _load_module()
+    target = tmp_path / "wb"
+    _bind_default_target(mod, target, monkeypatch)
     exe = tmp_path / "setup.exe"
     exe.write_bytes(b"MZ-stub")
     p = _make_plugin(mod, tmp_path)
-    res = asyncio.run(
-        p.install(
-            mod.InstallParams(
-                zip=str(exe), target=str(tmp_path / "custom"), launch=False, shortcut=False
-            )
-        )
-    )
+    p._run_setup_exe = lambda _path: {"ok": False, "error": "exit=1 权限不足"}
+    res = asyncio.run(p.install(mod.InstallParams(exe=str(exe), launch=False, shortcut=False)))
     assert isinstance(res, mod.Err), res
-    assert "默认目录" in str(res.error)
+    assert "安装程序" in str(res.error)
 
 
-def test_safe_extract_rejects_zip_bomb(tmp_path, monkeypatch) -> None:
+def test_install_detects_missing_start_cmd_after_setup(tmp_path, monkeypatch) -> None:
+    # 安装器"成功退出"但没落盘(被杀软拦截等):必须报错而不是假装成功
     mod = _load_module()
-    z = tmp_path / "bomb.zip"
-    with zipfile.ZipFile(z, "w") as zf:
-        for i in range(3):
-            zf.writestr(f"f{i}.txt", "x")
-    # 实现体在垫片内的 _impl_mod(垫片只转出公开符号,私有常量从实现模块取)
-    impl = mod._impl_mod
-    monkeypatch.setattr(impl, "_MAX_ZIP_FILES", 2)
-    with pytest.raises(ValueError, match="文件数"):
-        impl._safe_extract(str(z), str(tmp_path / "out"))
-
-
-def test_safe_extract_rejects_oversize(tmp_path, monkeypatch) -> None:
-    mod = _load_module()
-    z = tmp_path / "big.zip"
-    with zipfile.ZipFile(z, "w") as zf:
-        zf.writestr("big.bin", "x" * 100)
-    impl = mod._impl_mod
-    monkeypatch.setattr(impl, "_MAX_ZIP_BYTES", 10)
-    with pytest.raises(ValueError, match="体积"):
-        impl._safe_extract(str(z), str(tmp_path / "out"))
-
-
-def test_install_rejects_zip_slip(tmp_path) -> None:
-    mod = _load_module()
-    z = _make_zip(tmp_path / "evil.zip", extra={"../evil.txt": "pwn"})
     target = tmp_path / "wb"
+    _bind_default_target(mod, target, monkeypatch)
+    exe = tmp_path / "setup.exe"
+    exe.write_bytes(b"MZ-stub")
     p = _make_plugin(mod, tmp_path)
-    res = asyncio.run(
-        p.install(mod.InstallParams(zip=str(z), target=str(target), launch=False, shortcut=False))
-    )
+    p._run_setup_exe = lambda _path: {"ok": True, "returncode": 0}
+    res = asyncio.run(p.install(mod.InstallParams(exe=str(exe), launch=False, shortcut=False)))
     assert isinstance(res, mod.Err), res
-    assert not (tmp_path / "evil.txt").exists()
-
-
-@pytest.mark.parametrize("sys_target", ["C:\\", "/"])
-def test_install_refuses_system_target(tmp_path, sys_target) -> None:
-    # 系统目标防护跨平台:Windows 盘根与 Unix 裸根都必须拒绝(官方 CI 跑在 Linux)
-    mod = _load_module()
-    z = _make_zip(tmp_path / "pkg.zip")
-    p = _make_plugin(mod, tmp_path)
-    res = asyncio.run(
-        p.install(mod.InstallParams(zip=str(z), target=sys_target, launch=False, shortcut=False))
-    )
-    assert isinstance(res, mod.Err), res
+    assert "start.cmd" in str(res.error)
 
 
 def test_launch_without_start_cmd_fails(tmp_path) -> None:
@@ -203,31 +206,6 @@ def test_launch_without_start_cmd_fails(tmp_path) -> None:
     p = _make_plugin(mod, tmp_path)
     res = asyncio.run(p.launch(target=str(empty)))
     assert isinstance(res, mod.Err), res
-
-
-def test_overwrite_preserves_runtime_and_workspace(tmp_path) -> None:
-    # 覆盖重装只替换工作台程序文件:runtime(API/会话)与 workspace(用户项目)必须保留
-    mod = _load_module()
-    z = _make_zip(tmp_path / "pkg.zip")
-    target = tmp_path / "wb"
-    p = _make_plugin(mod, tmp_path)
-    params = dict(zip=str(z), target=str(target), launch=False, shortcut=False)
-    res1 = asyncio.run(p.install(mod.InstallParams(**params)))
-    assert _val(res1).get("ok") is True
-
-    user_file = target / "workspace" / "myproject.txt"
-    user_file.parent.mkdir(parents=True)
-    user_file.write_text("precious", encoding="utf-8")
-    rt_file = target / "runtime" / "config.json"
-    rt_file.parent.mkdir(parents=True)
-    rt_file.write_text("{}", encoding="utf-8")
-
-    res2 = asyncio.run(p.install(mod.InstallParams(**{**params, "overwrite": True})))
-    v = _val(res2)
-    assert v.get("ok") is True, v
-    assert user_file.read_text(encoding="utf-8") == "precious"  # 用户项目不许删
-    assert rt_file.is_file()  # 用户配置不许删
-    assert (target / "start.cmd").is_file()  # 程序件已重装
 
 
 @pytest.mark.skipif(os.name != "nt", reason="creationflags 仅 Windows")

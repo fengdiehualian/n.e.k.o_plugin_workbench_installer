@@ -1,11 +1,11 @@
 """猫娘计划(N.E.K.O.)插件:Agent 工作台安装器
 
 在猫娘计划里一键安装「N.E.K.O. 插件工坊」(Agent 工作台):
-在线下载官方便携包(或使用本地 zip)→ 解压安装 → 可选建桌面快捷方式 → 一键启动;
+下载官方安装版 Setup.exe(或用本地 exe)→ 静默安装 → 可选建桌面快捷方式 → 一键启动;
 随时查看安装与运行状态。所有入口都双注册为 llm_tool,对猫娘说「安装工作台」即可触发。
 
 入口:
-  - install : 安装/覆盖安装 Agent 工作台
+  - install : 安装/覆盖安装 Agent 工作台(仅官方安装版 exe)
   - status  : 查看安装与运行状态
   - launch  : 启动工作台(已在运行则直接返回地址)
 """
@@ -20,7 +20,6 @@ import asyncio
 import os
 import shutil
 import subprocess
-import zipfile
 
 from plugin.sdk.plugin import (
     Err,
@@ -42,10 +41,9 @@ except ImportError:  # 仅缺包时降级到标准库实现;httpx 自身的其�
     httpx = None
 
 _PLUGIN_ID = "workbench_installer"
-# 官方从 v1.2.5 起只发安装版 exe,不再更新便携 zip;
-# 旧的 NEKO.PluginWorkshop-Portable.zip 已停留在 v1.2.3,因此默认取 Setup.exe
+# 官方从 v1.2.5 起只发安装版 exe,便携 zip 已停更在 v1.2.3;
+# 本插件只走官方安装器,不再支持 zip 解压安装。
 _SETUP_ASSET = "N.E.K.O.PluginWorkshop-Setup.exe"
-_PORTABLE_ASSET = "NEKO.PluginWorkshop-Portable.zip"
 _RELEASE_BASE = "https://github.com/fengdiehualian/neko-plugin-workshop/releases/latest/download/"
 _DEFAULT_URL = _RELEASE_BASE + _SETUP_ASSET
 _HEALTH_URL = "http://127.0.0.1:5099/api/health"
@@ -55,9 +53,6 @@ _SHORTCUT_NAME = "N.E.K.O.插件工坊"
 # 不再硬编码 7890/7892 之类本地端口:那些端口可能是别的软件在用,
 # 且每个候选都会把 133MB 完整重下一遍(实测最坏 30 分钟)。
 _PROXY_ATTEMPTS = ("config", "env", "direct")
-# zip 解压安全上限:防压缩炸弹(正常包约 3600 个文件 / 340MB)
-_MAX_ZIP_FILES = 20000
-_MAX_ZIP_BYTES = 2 * 1024 * 1024 * 1024
 
 
 def _default_target() -> str:
@@ -65,50 +60,6 @@ def _default_target() -> str:
         os.path.expanduser("~"), "AppData", "Local"
     )
     return os.path.join(base, "Programs", "NEKOWorkshop")
-
-
-def _is_system_target(target: str) -> bool:
-    """拒绝把系统目录当安装/覆盖目标(安全底线;跨平台)。"""
-    raw = str(target).strip()
-    # Windows 盘根:任何平台都拒绝(Linux 上 "C:\\..." 只会是笔误,不是合法安装点)
-    if len(raw) in (2, 3) and raw[1] == ":" and raw[0].isalpha() and (
-        len(raw) == 2 or raw[2] in "\\/"
-    ):
-        return True
-    t = os.path.abspath(raw).rstrip("\\/").lower()
-    drive = os.environ.get("SystemDrive", "C:").lower()
-    if t in (drive, drive + "\\"):
-        return True
-    if t == drive + "\\users":
-        return True
-    for var in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)"):
-        p = (os.environ.get(var) or "").rstrip("\\/").lower()
-        if p and (t == p or t.startswith(p + "\\")):
-            return True
-    # Unix 系统目录(含裸根):同样拒绝
-    normalized = os.path.abspath(raw).replace("\\", "/").rstrip("/") or "/"
-    if normalized in {
-        "/", "/bin", "/boot", "/dev", "/etc", "/lib", "/lib64",
-        "/proc", "/root", "/sbin", "/sys", "/usr", "/var",
-    }:
-        return True
-    return False
-
-
-def _safe_extract(zip_path: str, target: str) -> int:
-    with zipfile.ZipFile(zip_path) as zf:
-        infos = zf.infolist()
-        if len(infos) > _MAX_ZIP_FILES:
-            raise ValueError(f"压缩包文件数异常({len(infos)}),拒绝解压")
-        total = sum(max(0, int(i.file_size)) for i in infos)
-        if total > _MAX_ZIP_BYTES:
-            raise ValueError(f"压缩包解压后体积异常({total} 字节),拒绝解压")
-        for info in infos:
-            parts = info.filename.replace("\\", "/").split("/")
-            if info.filename.startswith(("/", "\\")) or ".." in parts:
-                raise ValueError(f"压缩包包含不安全路径: {info.filename}")
-        zf.extractall(target)
-        return len(infos)
 
 
 def _download_urllib(url: str, dest: str, proxy: str | None, trust_env: bool) -> None:
@@ -141,16 +92,13 @@ def _make_httpx_client(timeout, proxy, trust_env: bool):
 
 
 class InstallParams(BaseModel):
-    target: str = Field(
-        "", description="安装目录;留空=默认 %LOCALAPPDATA%\\Programs\\NEKOWorkshop"
-    )
-    zip: str = Field("", description="本地便携包(.zip)路径;填了就不联网下载")
-    url: str = Field("", description="下载地址;留空=官方 Release 最新便携包")
+    exe: str = Field("", description="本地安装包(.exe)路径;填了就不联网下载")
+    url: str = Field("", description="下载地址;留空=官方 Release 最新安装版")
     launch: bool = Field(True, description="安装完成后是否立刻启动")
     shortcut: bool = Field(True, description="是否创建桌面快捷方式")
     overwrite: bool = Field(
         False,
-        description="目标已安装时是否覆盖重装(默认拒绝覆盖;覆盖只替换工作台程序文件,保留 runtime 配置与 workspace 用户项目)",
+        description="已安装时是否覆盖重装(默认拒绝;官方安装器会保留 runtime 配置与 workspace 用户项目)",
     )
 
 
@@ -171,7 +119,6 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
         cfg = cfg if isinstance(cfg, dict) else {}
         section = cfg.get(_PLUGIN_ID)
         section = section if isinstance(section, dict) else {}
-        self._cfg_target = str(section.get("target", "") or "").strip()
         self._cfg_url = str(section.get("url", "") or "").strip() or _DEFAULT_URL
         self._cfg_proxy = str(section.get("proxy", "") or "").strip()
         try:
@@ -197,7 +144,8 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
 
     # ── 辅助 ──
     def _resolve_target(self, target: str) -> str:
-        t = (target or "").strip() or self._cfg_target or _default_target()
+        # 安装位置由官方安装器决定(固定默认目录);target 只用于 status/launch 探测自定义安装
+        t = (target or "").strip() or _default_target()
         return os.path.abspath(os.path.expandvars(os.path.expanduser(t)))
 
     def _probe_install(self, target: str) -> dict:
@@ -372,31 +320,28 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
         except Exception as e:
             return {"ok": False, "error": f"创建快捷方式失败: {e}"}
 
-    # ── 入口:安装 ──
+    # ── 入口:安装(仅官方安装版 exe)──
     @llm_tool(
         name="workbench_installer_install",
-        description="安装「N.E.K.O. 插件工坊」(Agent 工作台)到这台电脑:下载便携包(或用本地 zip)、"
-        "解压安装、可选创建桌面快捷方式并启动。当用户想安装/重装 Agent 工作台、插件工坊时使用。",
+        description="安装「N.E.K.O. 插件工坊」(Agent 工作台)到这台电脑:下载官方安装版 Setup.exe"
+        "(或用本地 exe)并静默安装,可选创建桌面快捷方式并启动。"
+        "当用户想安装/重装 Agent 工作台、插件工坊时使用。",
         parameters={
             "type": "object",
             "properties": {
-                "target": {
+                "exe": {
                     "type": "string",
-                    "description": "安装目录;留空=默认 %LOCALAPPDATA%\\Programs\\NEKOWorkshop",
-                },
-                "zip": {
-                    "type": "string",
-                    "description": "本地便携包(.zip)路径;填了就不联网下载",
+                    "description": "本地安装包(.exe)路径;填了就不联网下载",
                 },
                 "url": {
                     "type": "string",
-                    "description": "下载地址;留空=官方 Release 最新便携包",
+                    "description": "下载地址;留空=官方 Release 最新安装版",
                 },
                 "launch": {"type": "boolean", "description": "装完是否立刻启动,默认 true"},
                 "shortcut": {"type": "boolean", "description": "是否创建桌面快捷方式,默认 true"},
                 "overwrite": {
                     "type": "boolean",
-                    "description": "目标已安装时是否覆盖重装,默认 false(拒绝覆盖)",
+                    "description": "已安装时是否覆盖重装,默认 false(拒绝覆盖)",
                 },
             },
         },
@@ -407,7 +352,7 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
     @plugin_entry(
         id="install",
         name="安装 Agent 工作台",
-        description="下载/解压安装 N.E.K.O. 插件工坊,可创建桌面快捷方式并启动",
+        description="下载官方安装版并静默安装,可创建桌面快捷方式并启动(仅支持 exe)",
         timeout=900.0,
         llm_result_fields=[
             "ok",
@@ -419,11 +364,16 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
         ],
     )
     async def install(self, params: InstallParams, **_):
-        target = self._resolve_target(params.target)
-        # 原始输入与解析后路径都要查:相对的系统目标(如 Linux 上的 "C:\\")
-        # 会被 _resolve_target 先拼成绝对路径,只查解析值会漏
-        if _is_system_target(params.target or "") or _is_system_target(target):
-            return Err(SdkError(f"拒绝安装到系统目录: {target}"))
+        # 先校验本地安装包:输入错误应立即报错,而不是被"已安装"挡住
+        exe_path = (params.exe or "").strip()
+        if exe_path:
+            if not os.path.isfile(exe_path):
+                return Err(SdkError(f"本地安装包不存在: {exe_path}"))
+            if not exe_path.lower().endswith(".exe"):
+                return Err(SdkError("只支持官方安装版 .exe;便携 zip 已停止支持"))
+
+        # 安装位置由官方安装器固定(默认目录),不支持自定义
+        target = self._resolve_target("")
         info = await asyncio.to_thread(self._probe_install, target)
         if info["installed"] and not params.overwrite:
             return Ok({
@@ -434,73 +384,28 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
                 "message": "工作台已安装,未执行覆盖;如需覆盖重装请传 overwrite=true",
             })
 
-        # 获取安装包:本地 zip 优先,否则联网下载
-        zip_path = (params.zip or "").strip()
-        source = zip_path or (params.url or "").strip() or self._cfg_url
-        if zip_path:
-            if not os.path.isfile(zip_path):
-                return Err(SdkError(f"本地便携包不存在: {zip_path}"))
-        else:
-            dest = os.path.join(
-                self.cache_path("download"), "NEKO.PluginWorkshop-Portable.zip"
-            )
-            self.logger.info("下载工作台便携包: {}", source)
+        # 获取安装包:本地 exe 优先,否则联网下载
+        source = exe_path or (params.url or "").strip() or self._cfg_url
+        if not exe_path:
+            dest = os.path.join(self.cache_path("download"), _SETUP_ASSET)
+            self.logger.info("下载工作台安装版: {}", source)
             got = await self._download(source, dest)
             if not got.get("ok"):
                 return Err(
-                    SdkError(f"下载失败(直连与常见代理均不可用): {got.get('error', '')}")
+                    SdkError(f"下载失败(配置代理/环境代理/直连均不可用): {got.get('error', '')}")
                 )
-            zip_path = got["path"]
+            exe_path = got["path"]
             source = f"{source} ({got['bytes']} bytes, via {got['via']})"
 
-        # —— 安装版 exe:交给官方安装器(它自己固定装到默认目录,并保证升级保留用户数据)——
-        if str(zip_path).lower().endswith(".exe"):
-            default_dir = _default_target()
-            if os.path.normcase(os.path.abspath(target)) != os.path.normcase(
-                os.path.abspath(os.path.expanduser(default_dir))
-            ):
-                return Err(SdkError(
-                    f"安装版只能装到默认目录 {default_dir};要装到自定义目录请改用便携包 zip"
-                ))
-            ran = await asyncio.to_thread(self._run_setup_exe, zip_path)
-            if not ran.get("ok"):
-                return Err(SdkError(f"运行安装程序失败: {ran.get('error', '')}"))
-            info = await self._wait_installed(target, 120.0)
-            if not info["installed"]:
-                return Err(SdkError(
-                    "安装程序已结束,但 120 秒内未检测到 start.cmd;请手动运行安装包确认"
-                ))
-            files = info["files"]
-        else:
-            # 覆盖安装:仅当目标确实是工作台目录时清理**工作台自有文件**后重装。
-            # runtime(API 配置/会话)与 workspace(用户生成的插件项目)是用户数据,
-            # 必须保留 —— 早期实现直接 rmtree(target) 会把用户项目一并删掉(实测事故)
-            if info["installed"] and params.overwrite:
-                try:
-                    for entry in os.listdir(target):
-                        if entry in ("runtime", "workspace"):
-                            continue
-                        p = os.path.join(target, entry)
-                        if os.path.isdir(p):
-                            shutil.rmtree(p, ignore_errors=True)
-                        else:
-                            try:
-                                os.unlink(p)
-                            except OSError:
-                                pass
-                except Exception as e:
-                    return Err(SdkError(f"清理旧安装失败: {e}"))
-            elif os.path.isdir(target) and not info["installed"] and os.listdir(target):
-                return Err(SdkError(
-                    f"目标目录已存在且不是工作台安装目录: {target};请换一个 target 或手动清空"
-                ))
-
-            try:
-                os.makedirs(target, exist_ok=True)
-                files = await asyncio.to_thread(_safe_extract, zip_path, target)
-            except Exception as e:
-                return Err(SdkError(f"解压安装失败: {e}"))
-            self.logger.info("已解压 {} 个文件到 {}", files, target)
+        ran = await asyncio.to_thread(self._run_setup_exe, exe_path)
+        if not ran.get("ok"):
+            return Err(SdkError(f"运行安装程序失败: {ran.get('error', '')}"))
+        info = await self._wait_installed(target, 120.0)
+        if not info["installed"]:
+            return Err(SdkError(
+                "安装程序已结束,但 120 秒内未检测到 start.cmd;请手动运行安装包确认"
+            ))
+        files = info["files"]
 
         shortcut = {"ok": False, "skipped": True}
         if params.shortcut:
