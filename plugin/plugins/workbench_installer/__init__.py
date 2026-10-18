@@ -51,6 +51,9 @@ _DEFAULT_URL = _RELEASE_BASE + _SETUP_ASSET
 _MIRROR_REPO = "maple-butterfly-flower-love/neko-plugin-workshop"
 _MIRROR_LATEST_API = f"https://gitee.com/api/v5/repos/{_MIRROR_REPO}/releases/latest"
 _MIRROR_ASSET = _SETUP_ASSET
+# 码云免费账号单附件上限 100MB,133MB 的 SFX 传不上去;镜像侧放 LZMA 压缩包,
+# 由插件自己解压安装(tar.xz 用标准库 tarfile+lzma 即可,不需要外部解压工具)。
+_MIRROR_ARCHIVE = "N.E.K.O.PluginWorkshop-Payload.tar.xz"
 # 主源(GitHub)的「停滞」阈值:连接后连续这么久收不到数据就判超时、切镜像。
 # 不用总时长上限——133MB 慢速下载本身可能就要 7-10 分钟,按总时长卡会误杀正常下载。
 _PRIMARY_STALL_SECONDS = 25.0
@@ -71,6 +74,16 @@ def _default_target() -> str:
         os.path.expanduser("~"), "AppData", "Local"
     )
     return os.path.join(base, "Programs", "NEKOWorkshop")
+
+
+def _looks_like_exe(path: str) -> bool:
+    """按文件头判断是不是 Windows 可执行文件(MZ),不看扩展名——
+    镜像下载的文件名固定为 Setup.exe,内容却可能是 tar.xz。"""
+    try:
+        with open(path, "rb") as f:
+            return f.read(2) == b"MZ"
+    except OSError:
+        return False
 
 
 def _download_urllib(
@@ -185,6 +198,48 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
             "size_mb": round(size / 1024 / 1024, 1),
         }
 
+    def _install_from_archive(self, archive: str, target: str) -> dict:
+        """把镜像压缩包(tar.xz)解压成工作台安装,保留 runtime/workspace 用户数据。"""
+        import tarfile
+
+        os.makedirs(target, exist_ok=True)
+        count = 0
+        try:
+            with tarfile.open(archive, "r:xz") as tf:
+                for member in tf:
+                    name = member.name.replace("\\", "/")
+                    while name.startswith("./"):
+                        name = name[2:]
+                    if not name or name == ".":
+                        continue
+                    parts = name.split("/")
+                    if name.startswith("/") or ".." in parts:
+                        raise ValueError(f"压缩包包含不安全路径: {member.name}")
+                    dest = os.path.join(target, name)
+                    # runtime/workspace 是用户数据区:已存在的文件一律不覆盖,
+                    # 但缺失的默认内容(如 workspace/.opencode/skill)仍要补上,
+                    # 否则全新安装会缺技能库。
+                    protected = parts[0] in ("runtime", "workspace")
+                    if member.isdir():
+                        os.makedirs(dest, exist_ok=True)
+                        continue
+                    if not member.isfile():  # 跳过符号链接/设备文件等
+                        continue
+                    if protected and os.path.exists(dest):
+                        continue
+                    parent = os.path.dirname(dest)
+                    if parent:
+                        os.makedirs(parent, exist_ok=True)
+                    src = tf.extractfile(member)
+                    if src is None:
+                        continue
+                    with src, open(dest, "wb") as out:
+                        shutil.copyfileobj(src, out)
+                    count += 1
+        except Exception as e:
+            return {"ok": False, "error": f"{e}"}
+        return {"ok": True, "files": count}
+
     def _proxy_for(self, attempt: str):
         """按尝试计划返回 (proxy, trust_env);config 未配置时返回 (None, None) 表示跳过。"""
         if attempt == "config":
@@ -287,10 +342,13 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
         except Exception as e:
             self.logger.warning("码云镜像地址解析失败,跳过回落: {}", e)
             return ""
-        for asset in data.get("assets", []) or []:
-            if asset.get("name") == _MIRROR_ASSET:
-                return str(asset.get("browser_download_url") or "")
-        self.logger.warning("码云最新发行版里没有 {} ,跳过回落", _MIRROR_ASSET)
+        for want in (_MIRROR_ASSET, _MIRROR_ARCHIVE):
+            for asset in data.get("assets", []) or []:
+                if asset.get("name") == want:
+                    return str(asset.get("browser_download_url") or "")
+        self.logger.warning(
+            "码云最新发行版里既没有 {} 也没有 {} ,跳过回落", _MIRROR_ASSET, _MIRROR_ARCHIVE
+        )
         return ""
 
     async def _download_preferring(self, primary_url: str, dest: str) -> dict:
@@ -500,15 +558,27 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
             exe_path = got["path"]
             source = f"{source} ({got['bytes']} bytes, via {got['via']})"
 
-        ran = await asyncio.to_thread(self._run_setup_exe, exe_path)
-        if not ran.get("ok"):
-            return Err(SdkError(f"运行安装程序失败: {ran.get('error', '')}"))
-        info = await self._wait_installed(target, 120.0)
-        if not info["installed"]:
-            return Err(SdkError(
-                "安装程序已结束,但 120 秒内未检测到 start.cmd;请手动运行安装包确认"
-            ))
-        files = info["files"]
+        # 按文件头分流:官方 SFX 安装器(MZ)交给安装器跑;
+        # 压缩包(码云镜像 >100MB 只能放压缩产物)由插件自己解压安装。
+        if _looks_like_exe(exe_path):
+            ran = await asyncio.to_thread(self._run_setup_exe, exe_path)
+            if not ran.get("ok"):
+                return Err(SdkError(f"运行安装程序失败: {ran.get('error', '')}"))
+            info = await self._wait_installed(target, 120.0)
+            if not info["installed"]:
+                return Err(SdkError(
+                    "安装程序已结束,但 120 秒内未检测到 start.cmd;请手动运行安装包确认"
+                ))
+            files = info["files"]
+        else:
+            packed = await asyncio.to_thread(self._install_from_archive, exe_path, target)
+            if not packed.get("ok"):
+                return Err(SdkError(f"解压安装失败: {packed.get('error', '')}"))
+            info = await asyncio.to_thread(self._probe_install, target)
+            if not info["installed"]:
+                return Err(SdkError("解压完成,但未找到 start.cmd;压缩包可能不完整"))
+            files = info["files"]
+            self.logger.info("已从压缩包解压安装 {} 个文件到 {}", packed.get("files"), target)
 
         shortcut = {"ok": False, "skipped": True}
         if params.shortcut:

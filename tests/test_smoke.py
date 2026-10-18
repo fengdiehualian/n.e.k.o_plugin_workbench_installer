@@ -327,3 +327,80 @@ def test_mirror_custom_url_used_directly(tmp_path) -> None:
     # 用户自定义了下载源时不再擅自换源
     p._cfg_mirror = ""
     assert asyncio.run(p._mirror_url("https://other.example.com/x.exe")) == ""
+
+
+# ---------- 压缩包安装路径(码云镜像 >100MB 只能放压缩产物)----------
+
+
+def _make_payload_archive(tmp_path: Path) -> Path:
+    import tarfile
+
+    stage = tmp_path / "stage"
+    (stage / "runtime").mkdir(parents=True)
+    (stage / "workspace" / "proj").mkdir(parents=True)
+    (stage / "start.cmd").write_text("@echo off\r\necho wb\r\n", encoding="utf-8")
+    (stage / "wb-studio.mjs").write_text("// stub", encoding="utf-8")
+    # 包里的 runtime/workspace 是空壳,解压时必须跳过,不能覆盖用户数据
+    (stage / "runtime" / "config.json").write_text("packaged", encoding="utf-8")
+    (stage / "workspace" / "proj" / "a.txt").write_text("packaged", encoding="utf-8")
+    archive = tmp_path / "payload.tar.xz"
+    with tarfile.open(archive, "w:xz") as tf:
+        for item in sorted(stage.rglob("*")):
+            tf.add(item, arcname=str(item.relative_to(stage)))
+    return archive
+
+
+def test_looks_like_exe_uses_magic_bytes(tmp_path) -> None:
+    mod = _load_module()
+    exe = tmp_path / "a.exe"
+    exe.write_bytes(b"MZ\x90\x00rest")
+    assert mod._impl_mod._looks_like_exe(str(exe)) is True
+    xz = tmp_path / "b.exe"  # 名字是 exe,内容却是 xz
+    xz.write_bytes(b"\xfd7zXZ\x00rest")
+    assert mod._impl_mod._looks_like_exe(str(xz)) is False
+
+
+def test_install_from_archive_keeps_user_data(tmp_path) -> None:
+    mod = _load_module()
+    p = _make_plugin(mod, tmp_path)
+    archive = _make_payload_archive(tmp_path)
+    target = tmp_path / "install"
+    (target / "runtime").mkdir(parents=True)
+    (target / "workspace").mkdir(parents=True)
+    (target / "runtime" / "config.json").write_text("user", encoding="utf-8")
+
+    res = p._install_from_archive(str(archive), str(target))
+    assert res.get("ok") is True, res
+    assert (target / "start.cmd").is_file()
+    assert (target / "wb-studio.mjs").is_file()
+    # 用户数据保留,未被包内空壳覆盖
+    assert (target / "runtime" / "config.json").read_text(encoding="utf-8") == "user"
+    assert (target / "workspace" / "proj" / "a.txt").is_file()
+
+
+def test_install_accepts_archive_from_mirror(tmp_path, monkeypatch) -> None:
+    """回落到码云拿到的是 tar.xz:走解压安装,不再调用 setup exe。"""
+    mod = _load_module()
+    p = _make_plugin(mod, tmp_path)
+    archive = _make_payload_archive(tmp_path)
+    target = tmp_path / "install"
+    _bind_default_target(mod, target, monkeypatch)
+
+    async def fake_preferring(primary_url, dest):
+        return {"ok": True, "path": str(archive), "bytes": archive.stat().st_size,
+                "via": "direct (gitee 镜像)", "fallback": True}
+
+    monkeypatch.setattr(p, "_download_preferring", fake_preferring)
+    called = {"setup": False}
+
+    def fake_setup(path):
+        called["setup"] = True
+        return {"ok": True, "returncode": 0}
+
+    monkeypatch.setattr(p, "_run_setup_exe", fake_setup)
+
+    params = mod.InstallParams(launch=False, shortcut=False)
+    res = _val(asyncio.run(p.install(params)))
+    assert res.get("ok") is True, res
+    assert called["setup"] is False, "压缩包不该再走 setup exe"
+    assert (target / "start.cmd").is_file()
