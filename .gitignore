@@ -16,3 +16,4 @@ vendor/
 # Test & runtime artifacts
 .pytest_cache/
 store.db
+.pytest-tmp/
