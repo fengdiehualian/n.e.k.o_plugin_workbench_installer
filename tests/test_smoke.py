@@ -360,6 +360,71 @@ def test_looks_like_exe_uses_magic_bytes(tmp_path) -> None:
     assert mod._impl_mod._looks_like_exe(str(xz)) is False
 
 
+def test_archive_kind_by_magic(tmp_path) -> None:
+    mod = _load_module()
+    impl = mod._impl_mod
+    exe = tmp_path / "a"
+    exe.write_bytes(b"MZ\x90\x00rest")
+    assert impl._archive_kind(str(exe)) == "exe"
+    sz = tmp_path / "b"
+    sz.write_bytes(b"7z\xbc\xaf\x27\x1c" + b"\x00" * 16)
+    assert impl._archive_kind(str(sz)) == "7z"
+    xz = tmp_path / "c"
+    xz.write_bytes(b"\xfd7zXZ\x00rest")
+    assert impl._archive_kind(str(xz)) == "xz"
+    other = tmp_path / "d"
+    other.write_bytes(b"PK\x03\x04")
+    assert impl._archive_kind(str(other)) == "unknown"
+
+
+def test_bundled_7zr_is_shipped() -> None:
+    """插件必须自带 7zr,否则用户机器没装 7-Zip 就解不开镜像包。"""
+    bundled = ROOT / "plugin" / "plugins" / "workbench_installer" / "bin" / "7zr.exe"
+    assert bundled.is_file(), f"缺少内置解压器: {bundled}"
+    assert bundled.stat().st_size > 300_000
+
+
+def _make_7z_payload(tmp_path: Path) -> Path:
+    """用内置 7zr 造一个测试包(含 runtime/workspace 空壳)。"""
+    import subprocess
+
+    mod = _load_module()
+    seven = mod._impl_mod._find_7zr()
+    if not seven:
+        pytest.skip("7zr 不可用")
+    stage = tmp_path / "stage7z"
+    (stage / "runtime").mkdir(parents=True)
+    (stage / "workspace" / "proj").mkdir(parents=True)
+    (stage / "start.cmd").write_text("@echo off\r\necho wb\r\n", encoding="utf-8")
+    (stage / "wb-studio.mjs").write_text("// stub", encoding="utf-8")
+    (stage / "runtime" / "config.json").write_text("packaged", encoding="utf-8")
+    (stage / "workspace" / "proj" / "a.txt").write_text("packaged", encoding="utf-8")
+    archive = tmp_path / "payload.7z"
+    subprocess.run(
+        [seven, "a", "-t7z", str(archive), "./*"],
+        cwd=str(stage),
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+    return archive
+
+
+def test_install_from_7z_keeps_user_data(tmp_path) -> None:
+    mod = _load_module()
+    archive = _make_7z_payload(tmp_path)
+    p = _make_plugin(mod, tmp_path)
+    target = tmp_path / "install"
+    (target / "runtime").mkdir(parents=True)
+    (target / "runtime" / "config.json").write_text("user", encoding="utf-8")
+
+    res = p._install_from_7z(str(archive), str(target))
+    assert res.get("ok") is True, res
+    assert (target / "start.cmd").is_file()
+    assert (target / "runtime" / "config.json").read_text(encoding="utf-8") == "user"
+    assert (target / "workspace" / "proj" / "a.txt").is_file()
+
+
 def test_install_from_archive_keeps_user_data(tmp_path) -> None:
     mod = _load_module()
     p = _make_plugin(mod, tmp_path)

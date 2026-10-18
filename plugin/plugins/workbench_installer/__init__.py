@@ -51,8 +51,10 @@ _DEFAULT_URL = _RELEASE_BASE + _SETUP_ASSET
 _MIRROR_REPO = "maple-butterfly-flower-love/neko-plugin-workshop"
 _MIRROR_LATEST_API = f"https://gitee.com/api/v5/repos/{_MIRROR_REPO}/releases/latest"
 _MIRROR_ASSET = _SETUP_ASSET
-# 码云免费账号单附件上限 100MB,133MB 的 SFX 传不上去;镜像侧放 LZMA 压缩包,
-# 由插件自己解压安装(tar.xz 用标准库 tarfile+lzma 即可,不需要外部解压工具)。
+# 码云免费账号单附件上限 100MB,133MB 的 SFX 传不上去;镜像侧放 7z 压缩包,
+# 由插件内置的 7zr 解压安装(7z 比 deflate 小得多,且解压/压缩工具统一)。
+_MIRROR_ARCHIVE_7Z = "N.E.K.O.PluginWorkshop-Payload.7z"
+# 兼容旧镜像:此前发过 tar.xz,标准库即可解,作为第三顺位
 _MIRROR_ARCHIVE = "N.E.K.O.PluginWorkshop-Payload.tar.xz"
 # 主源(GitHub)的「停滞」阈值:连接后连续这么久收不到数据就判超时、切镜像。
 # 不用总时长上限——133MB 慢速下载本身可能就要 7-10 分钟,按总时长卡会误杀正常下载。
@@ -78,12 +80,50 @@ def _default_target() -> str:
 
 def _looks_like_exe(path: str) -> bool:
     """按文件头判断是不是 Windows 可执行文件(MZ),不看扩展名——
-    镜像下载的文件名固定为 Setup.exe,内容却可能是 tar.xz。"""
+    镜像下载的文件名固定为 Setup.exe,内容却可能是压缩包。"""
     try:
         with open(path, "rb") as f:
             return f.read(2) == b"MZ"
     except OSError:
         return False
+
+
+def _archive_kind(path: str) -> str:
+    """按文件头判类型:exe / 7z / xz / unknown。"""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(6)
+    except OSError:
+        return "unknown"
+    if head[:2] == b"MZ":
+        return "exe"
+    if head == b"7z\xbc\xaf\x27\x1c":
+        return "7z"
+    if head == b"\xfd7zXZ\x00":
+        return "xz"
+    return "unknown"
+
+
+def _find_7zr() -> str:
+    """找可用的 7z 可执行文件:插件内置 bin/7zr.exe → PATH → 常见安装路径。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in ("7zr.exe", "7za.exe", "7z.exe"):
+        p = os.path.join(here, "bin", name)
+        if os.path.isfile(p):
+            return p
+    for name in ("7zr", "7za", "7z"):
+        p = shutil.which(name)
+        if p:
+            return p
+    for p in (
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "7-Zip", "7z.exe"),
+        os.path.join(
+            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "7-Zip", "7z.exe"
+        ),
+    ):
+        if os.path.isfile(p):
+            return p
+    return ""
 
 
 def _download_urllib(
@@ -197,6 +237,57 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
             "files": files,
             "size_mb": round(size / 1024 / 1024, 1),
         }
+
+    @staticmethod
+    def _merge_tree(src: str, dst: str) -> int:
+        """把解压出来的临时树合进安装目录。
+
+        runtime/workspace 是用户数据区:目标已存在的文件不覆盖;
+        其余程序文件一律覆盖(升级要生效)。
+        """
+        copied = 0
+        for root, _dirs, files in os.walk(src):
+            rel = os.path.relpath(root, src)
+            top = "" if rel == "." else rel.split(os.sep)[0]
+            protected = top in ("runtime", "workspace")
+            out_dir = dst if rel == "." else os.path.join(dst, rel)
+            os.makedirs(out_dir, exist_ok=True)
+            for name in files:
+                s = os.path.join(root, name)
+                d = os.path.join(out_dir, name)
+                if protected and os.path.exists(d):
+                    continue
+                shutil.copy2(s, d)
+                copied += 1
+        return copied
+
+    def _install_from_7z(self, archive: str, target: str) -> dict:
+        """用 7z(优先插件内置 7zr)解压到临时目录,再合并进安装目录。"""
+        seven = _find_7zr()
+        if not seven:
+            return {
+                "ok": False,
+                "error": "未找到 7z 解压程序(插件内置 7zr 缺失且系统未安装 7-Zip)",
+            }
+        tmp = os.path.join(self.cache_path("extract"), "payload")
+        shutil.rmtree(tmp, ignore_errors=True)
+        os.makedirs(tmp, exist_ok=True)
+        try:
+            proc = subprocess.run(
+                [seven, "x", archive, f"-o{tmp}", "-y", "-bso0", "-bsp0"],
+                capture_output=True,
+                text=True,
+                timeout=1800,
+            )
+            if proc.returncode != 0:
+                detail = (proc.stderr or proc.stdout or "").strip()[:300]
+                return {"ok": False, "error": f"7z 解压失败(exit {proc.returncode}): {detail}"}
+            count = self._merge_tree(tmp, target)
+        except Exception as e:
+            return {"ok": False, "error": f"{e}"}
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        return {"ok": True, "files": count}
 
     def _install_from_archive(self, archive: str, target: str) -> dict:
         """把镜像压缩包(tar.xz)解压成工作台安装,保留 runtime/workspace 用户数据。"""
@@ -342,12 +433,13 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
         except Exception as e:
             self.logger.warning("码云镜像地址解析失败,跳过回落: {}", e)
             return ""
-        for want in (_MIRROR_ASSET, _MIRROR_ARCHIVE):
+        for want in (_MIRROR_ARCHIVE_7Z, _MIRROR_ASSET, _MIRROR_ARCHIVE):
             for asset in data.get("assets", []) or []:
                 if asset.get("name") == want:
                     return str(asset.get("browser_download_url") or "")
         self.logger.warning(
-            "码云最新发行版里既没有 {} 也没有 {} ,跳过回落", _MIRROR_ASSET, _MIRROR_ARCHIVE
+            "码云最新发行版里没有 {} / {} / {} ,跳过回落",
+            _MIRROR_ARCHIVE_7Z, _MIRROR_ASSET, _MIRROR_ARCHIVE,
         )
         return ""
 
@@ -559,8 +651,9 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
             source = f"{source} ({got['bytes']} bytes, via {got['via']})"
 
         # 按文件头分流:官方 SFX 安装器(MZ)交给安装器跑;
-        # 压缩包(码云镜像 >100MB 只能放压缩产物)由插件自己解压安装。
-        if _looks_like_exe(exe_path):
+        # 7z 压缩包用内置 7zr 解压;旧的 tar.xz 用标准库兜底。
+        kind = _archive_kind(exe_path)
+        if kind == "exe":
             ran = await asyncio.to_thread(self._run_setup_exe, exe_path)
             if not ran.get("ok"):
                 return Err(SdkError(f"运行安装程序失败: {ran.get('error', '')}"))
@@ -571,14 +664,19 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
                 ))
             files = info["files"]
         else:
-            packed = await asyncio.to_thread(self._install_from_archive, exe_path, target)
+            if kind == "7z":
+                packed = await asyncio.to_thread(self._install_from_7z, exe_path, target)
+            else:
+                packed = await asyncio.to_thread(self._install_from_archive, exe_path, target)
             if not packed.get("ok"):
                 return Err(SdkError(f"解压安装失败: {packed.get('error', '')}"))
             info = await asyncio.to_thread(self._probe_install, target)
             if not info["installed"]:
                 return Err(SdkError("解压完成,但未找到 start.cmd;压缩包可能不完整"))
             files = info["files"]
-            self.logger.info("已从压缩包解压安装 {} 个文件到 {}", packed.get("files"), target)
+            self.logger.info(
+                "已从压缩包({})安装 {} 个文件到 {}", kind, packed.get("files"), target
+            )
 
         shortcut = {"ok": False, "skipped": True}
         if params.shortcut:
