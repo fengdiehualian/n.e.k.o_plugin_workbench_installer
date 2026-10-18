@@ -1,11 +1,11 @@
 [plugin]
 id = "workbench_installer"
 name = "Agent工作台安装器"
-version = "0.1.4"
+version = "0.2.0"
 type = "plugin"
-description = "在猫娘计划(N.E.K.O.)里一键安装「N.E.K.O. 插件工坊」Agent 工作台:在线下载官方便携包或使用本地 zip,解压安装、创建桌面快捷方式并启动;随时查看安装与运行状态。对猫娘说「安装工作台」「启动工作台」即可使用。"
-short_description = "Install & launch the N.E.K.O. Plugin Workbench (Agent workbench) from inside N.E.K.O."
-keywords = ["安装", "工作台", "工坊", "插件工坊", "Agent工作台", "workbench", "installer", "安装器", "启动工作台", "重装"]
+description = "在猫娘计划(N.E.K.O.)里一键安装「N.E.K.O. 插件工坊」Agent 工作台:默认下载官方安装版(Setup.exe 静默安装),也可用本地便携包 zip 装到自定义目录;自动创建桌面快捷方式并启动,随时查看安装与运行状态。对猫娘说「安装工作台」「启动工作台」即可使用。"
+short_description = "在猫娘计划里一键安装、启动「N.E.K.O. 插件工坊」Agent 工作台"
+keywords = ["安装", "工作台", "工坊", "插件工坊", "Agent工作台", "workbench", "installer", "安装器", "启动工作台", "重装", "下载"]
 entry = "plugin.plugins.workbench_installer:WorkbenchInstallerPlugin"
 
 [plugin.author]
@@ -17,11 +17,18 @@ supported = ">=0.1.0,<0.3.0"
 
 [plugin_runtime]
 enabled = true
+# 安装器不需要随 N.E.K.O 启动而自启,由用户/猫娘主动触发即可
+auto_start = false
 timeout = 60
 startup_failure = "warn"
 
 [workbench_installer]
 # 默认安装目录(留空 = %LOCALAPPDATA%\Programs\NEKOWorkshop)
+# 注意:安装版 exe 只能装到这里;自定义目录请传 zip(便携包)
 target = ""
-# 便携包下载地址(留空 = 官方 GitHub Release 最新便携包)
+# 下载地址(留空 = 官方 Release 最新安装版 Setup.exe)
 url = ""
+# 下载代理(留空 = 先读环境变量代理,再直连);形如 http://127.0.0.1:7890
+proxy = ""
+# 下载整体超时(秒,60-1800,默认 900)
+download_timeout = 900

@@ -1,9 +1,14 @@
 [plugin_runtime]
 enabled = true
-auto_start = true
+auto_start = false
 
 [workbench_installer]
 # 默认安装目录(留空 = %LOCALAPPDATA%\Programs\NEKOWorkshop)
+# 注意:安装版 exe 只能装到这里;自定义目录请传 zip(便携包)
 target = ""
-# 便携包下载地址(留空 = 官方 GitHub Release 最新便携包)
+# 下载地址(留空 = 官方 Release 最新安装版 Setup.exe)
 url = ""
+# 下载代理(留空 = 先读环境变量代理,再直连);形如 http://127.0.0.1:7890
+proxy = ""
+# 下载整体超时(秒,60-1800,默认 900)
+download_timeout = 900
