@@ -1,7 +1,7 @@
 [plugin]
 id = "workbench_installer"
 name = "Agent工作台安装器"
-version = "0.2.1"
+version = "0.2.2"
 type = "plugin"
 description = "在猫娘计划(N.E.K.O.)里一键安装「N.E.K.O. 插件工坊」Agent 工作台:下载官方安装版(Setup.exe)静默安装,自动创建桌面快捷方式并启动,随时查看安装与运行状态。对猫娘说「安装工作台」「启动工作台」即可使用。"
 short_description = "在猫娘计划里一键安装、启动「N.E.K.O. 插件工坊」Agent 工作台"
@@ -27,6 +27,8 @@ startup_failure = "warn"
 url = ""
 # 镜像回退(留空 = GitHub 超时后自动用码云最新发行版资产;填 off 关闭;也可填具体直链)
 mirror = ""
+# 下载失败时自动弹出手动下载页(可一键复制地址到浏览器);填 false 关闭
+manual_page = true
 # 下载代理(留空 = 先读环境变量代理,再直连);形如 http://127.0.0.1:7890
 proxy = ""
 # 下载整体超时(秒,60-1800,默认 900)

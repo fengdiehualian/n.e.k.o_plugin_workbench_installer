@@ -88,6 +88,18 @@ def _looks_like_exe(path: str) -> bool:
         return False
 
 
+def _html_escape(text: str) -> str:
+    """最小 HTML 转义,用于手动下载页(URL 和错误信息都可能含特殊字符)。"""
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
+
+
 def _archive_kind(path: str) -> str:
     """按文件头判类型:exe / 7z / xz / unknown。"""
     try:
@@ -166,6 +178,10 @@ class InstallParams(BaseModel):
         False,
         description="已安装时是否覆盖重装(默认拒绝;官方安装器会保留 runtime 配置与 workspace 用户项目)",
     )
+    manual_page: bool = Field(
+        True,
+        description="下载失败时是否自动弹出手动下载页(内含可一键复制的下载地址)",
+    )
 
 
 @neko_plugin
@@ -177,6 +193,7 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
         self._cfg_target = ""
         self._cfg_url = _DEFAULT_URL
         self._cfg_mirror = ""
+        self._cfg_manual_page = True
         self._cfg_proxy = ""
         self._cfg_download_timeout = 900.0
 
@@ -189,6 +206,8 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
         self._cfg_url = str(section.get("url", "") or "").strip() or _DEFAULT_URL
         # mirror: 留空=自动用码云最新发行版资产;"off"/"none"=关闭回落;或填具体直链
         self._cfg_mirror = str(section.get("mirror", "") or "").strip()
+        flag = str(section.get("manual_page", "true")).strip().lower()
+        self._cfg_manual_page = flag not in ("0", "false", "off", "no")
         self._cfg_proxy = str(section.get("proxy", "") or "").strip()
         try:
             t = float(section.get("download_timeout", 900) or 900)
@@ -453,9 +472,11 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
             kind == "http" and (status in _FALLBACK_STATUS or (status or 0) >= 500)
         )
         if not retryable:
+            got["tried"] = [primary_url]
             return got
         mirror = await self._mirror_url(primary_url)
         if not mirror:
+            got["tried"] = [primary_url]
             return got
         self.logger.info("主源失败({}),改用码云镜像: {}", kind, mirror)
         got2 = await self._download(mirror, dest)
@@ -466,10 +487,103 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
         return {
             "ok": False,
             "kind": got2.get("kind") or kind,
+            "tried": [primary_url, mirror],
             "error": f"github 失败: {got.get('error', '')} || gitee 失败: {got2.get('error', '')}"[
                 :800
             ],
         }
+
+    # ── 手动下载兜底页 ──
+
+    def _manual_page_html(self, urls: list[str], detail: str) -> str:
+        rows = []
+        for i, u in enumerate(urls, 1):
+            safe = _html_escape(u)
+            rows.append(
+                f'<div class="row"><div class="idx">{i}</div>'
+                f'<div class="url" id="u{i}">{safe}</div>'
+                f'<div class="acts">'
+                f'<button onclick="copyUrl(\'u{i}\',this)">复制</button>'
+                f'<a class="btn" href="{safe}" target="_blank" rel="noreferrer">打开</a>'
+                f"</div></div>"
+            )
+        url_list = "\n".join(rows)
+        safe_detail = _html_escape(detail or "未知原因")
+        hints = (
+            "1) 点「复制」把地址复制到剪贴板,再粘贴到浏览器地址栏回车;<br>"
+            "2) 下载得到的文件双击运行,选默认目录安装(会保留配置与用户项目);<br>"
+            "3) 装好后回到猫娘说「启动工作台」即可。"
+        )
+        return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>N.E.K.O 插件工坊 · 手动下载</title>
+<style>
+:root{{color-scheme:light}}
+body{{margin:0;padding:40px 20px;font:15px/1.6 "Segoe UI","Microsoft YaHei",sans-serif;
+background:#fdf6f8;color:#33262c}}
+.card{{max-width:760px;margin:0 auto;background:#fff;border-radius:16px;padding:28px 30px;
+box-shadow:0 8px 30px rgba(190,90,130,.12)}}
+h1{{margin:0 0 6px;font-size:21px;color:#b23a63}}
+.sub{{color:#8a7078;font-size:13px;margin-bottom:18px}}
+.err{{background:#fff2f5;border-left:4px solid #e2749a;padding:10px 14px;border-radius:8px;
+font-size:12.5px;color:#8a4055;word-break:break-all;margin-bottom:20px;max-height:140px;overflow:auto}}
+.row{{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px dashed #f0dfe5}}
+.idx{{width:22px;height:22px;flex:0 0 22px;border-radius:50%;background:#f6d3df;color:#a83b60;
+font-size:12px;display:flex;align-items:center;justify-content:center}}
+.url{{flex:1;font-family:Consolas,monospace;font-size:12px;word-break:break-all;color:#4a3540}}
+.acts{{display:flex;gap:6px;flex:0 0 auto}}
+button,.btn{{font:12px/1 inherit;padding:7px 12px;border-radius:8px;border:1px solid #e9c3d1;
+background:#fff;color:#a83b60;cursor:pointer;text-decoration:none;white-space:nowrap}}
+button:hover,.btn:hover{{background:#fdeef3}}
+button.done{{background:#e8f7ee;border-color:#bfe6cd;color:#2c7a4b}}
+.tips{{margin-top:20px;font-size:13px;color:#6d5b63;background:#fbf7f9;padding:14px 16px;border-radius:10px}}
+.foot{{margin-top:18px;font-size:12px;color:#a2919a}}
+</style></head><body><div class="card">
+<h1>下载失败了，这里有手动下载地址</h1>
+<div class="sub">GitHub 和码云镜像都没拉下来。可以用下面的地址手动下载安装。</div>
+<div class="err">失败原因：{safe_detail}</div>
+{url_list}
+<div class="tips">{hints}</div>
+<div class="foot">安装目录固定为 %LOCALAPPDATA%\\Programs\\NEKOWorkshop，覆盖安装会保留 runtime 配置与 workspace 里的作品。</div>
+</div>
+<script>
+function copyUrl(id, btn){{
+  var t = document.getElementById(id).innerText.trim();
+  function ok(){{ var old = btn.textContent; btn.textContent = '已复制'; btn.classList.add('done');
+    setTimeout(function(){{ btn.textContent = old; btn.classList.remove('done'); }}, 1500); }}
+  if (navigator.clipboard && window.isSecureContext) {{
+    navigator.clipboard.writeText(t).then(ok, function(){{ fallback(t, ok); }});
+  }} else {{ fallback(t, ok); }}
+}}
+function fallback(text, cb){{
+  var ta = document.createElement('textarea');
+  ta.value = text; ta.style.position='fixed'; ta.style.opacity='0';
+  document.body.appendChild(ta); ta.select();
+  try {{ document.execCommand('copy'); cb(); }} catch(e) {{ alert('复制失败，请手动选中地址复制'); }}
+  document.body.removeChild(ta);
+}}
+</script></body></html>"""
+
+    def _open_manual_page(self, urls: list[str], detail: str) -> str:
+        """生成手动下载页并用默认浏览器打开;返回文件路径(失败返回空串)。"""
+        path = self.cache_path("manual-download.html")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self._manual_page_html(urls, detail))
+        except OSError as e:
+            self.logger.warning("写手动下载页失败: {}", e)
+            return ""
+        try:
+            if os.name == "nt":
+                os.startfile(path)  # noqa: S606 - 打开本地 HTML 供用户手动下载
+            else:
+                import webbrowser
+
+                webbrowser.open(f"file://{path}")
+        except Exception as e:
+            self.logger.warning("打开手动下载页失败: {}", e)
+            return path
+        return path
 
     async def _health(self):
         # 本机回环探测绝不能走代理:环境里一旦有 HTTP_PROXY,127.0.0.1 会被拦掉,
@@ -598,6 +712,10 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
                     "type": "boolean",
                     "description": "已安装时是否覆盖重装,默认 false(拒绝覆盖)",
                 },
+                "manual_page": {
+                    "type": "boolean",
+                    "description": "下载失败时是否自动弹出手动下载页(可一键复制下载地址),默认 true",
+                },
             },
         },
         # 官方文档硬上限:@llm_tool timeout ≤ 300 秒(服务端会截断)。下载慢时可能不够,
@@ -646,7 +764,24 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
             self.logger.info("下载工作台安装版: {}", source)
             got = await self._download_preferring(source, dest)
             if not got.get("ok"):
-                return Err(SdkError(f"下载失败(含码云镜像回落): {got.get('error', '')}"))
+                urls = [u for u in (got.get("tried") or []) if u] or [source]
+                page = ""
+                if params.manual_page and self._cfg_manual_page:
+                    page = await asyncio.to_thread(
+                        self._open_manual_page, urls, got.get("error", "")
+                    )
+                urls_text = " 、 ".join(urls)
+                tail = (
+                    f"已为你打开手动下载页({page}),可一键复制地址;"
+                    if page
+                    else ""
+                )
+                return Err(
+                    SdkError(
+                        f"下载失败(含码云镜像回落)。{tail}手动下载地址: {urls_text}。"
+                        f"原因: {got.get('error', '')}"
+                    )
+                )
             exe_path = got["path"]
             source = f"{source} ({got['bytes']} bytes, via {got['via']})"
 

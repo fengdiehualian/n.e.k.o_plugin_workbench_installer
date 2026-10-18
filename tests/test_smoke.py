@@ -425,6 +425,81 @@ def test_install_from_7z_keeps_user_data(tmp_path) -> None:
     assert (target / "workspace" / "proj" / "a.txt").is_file()
 
 
+# ---------- 下载全失败时的手动下载页 ----------
+
+
+def test_manual_page_html_has_urls_and_copy(tmp_path) -> None:
+    mod = _load_module()
+    p = _make_plugin(mod, tmp_path)
+    urls = [
+        "https://github.com/a/b/releases/latest/download/x.exe",
+        "https://gitee.com/c/d/releases/download/v1/x.7z",
+    ]
+    html = p._manual_page_html(urls, "github 超时 <timeout> & 镜像失败")
+    assert "复制" in html and "copyUrl" in html
+    for u in urls:
+        assert u in html
+    # 错误信息必须转义,不能把尖括号当标签
+    assert "&lt;timeout&gt;" in html and "&amp;" in html
+
+
+def test_install_failure_opens_manual_page(tmp_path, monkeypatch) -> None:
+    mod = _load_module()
+    p = _make_plugin(mod, tmp_path)
+    target = tmp_path / "install"
+    _bind_default_target(mod, target, monkeypatch)
+
+    tried = [
+        "https://github.com/a/b/releases/latest/download/N.E.K.O.PluginWorkshop-Setup.exe",
+        "https://gitee.com/c/d/releases/download/v1/N.E.K.O.PluginWorkshop-Payload.7z",
+    ]
+
+    async def fail(primary_url, dest):
+        return {"ok": False, "kind": "timeout", "tried": tried, "error": "read timeout"}
+
+    monkeypatch.setattr(p, "_download_preferring", fail)
+    opened = {}
+
+    def fake_open(urls, detail):
+        opened["urls"] = urls
+        opened["detail"] = detail
+        return str(tmp_path / "manual-download.html")
+
+    monkeypatch.setattr(p, "_open_manual_page", fake_open)
+
+    res = asyncio.run(p.install(mod.InstallParams(launch=False, shortcut=False)))
+    assert isinstance(res, mod.Err), res
+    assert opened.get("urls") == tried
+    err = str(res.error)
+    assert "手动下载页" in err
+    assert "gitee.com" in err or "github.com" in err
+
+
+def test_install_failure_without_page_still_lists_urls(tmp_path, monkeypatch) -> None:
+    mod = _load_module()
+    p = _make_plugin(mod, tmp_path)
+    target = tmp_path / "install"
+    _bind_default_target(mod, target, monkeypatch)
+    tried = ["https://github.com/a/b/x.exe", "https://gitee.com/c/d/x.7z"]
+
+    async def fail(primary_url, dest):
+        return {"ok": False, "kind": "conn", "tried": tried, "error": "connect refused"}
+
+    monkeypatch.setattr(p, "_download_preferring", fail)
+
+    def boom(urls, detail):
+        raise AssertionError("manual_page=False 时不该弹页")
+
+    monkeypatch.setattr(p, "_open_manual_page", boom)
+
+    params = mod.InstallParams(launch=False, shortcut=False, manual_page=False)
+    res = asyncio.run(p.install(params))
+    assert isinstance(res, mod.Err), res
+    err = str(res.error)
+    assert "https://github.com/a/b/x.exe" in err
+    assert "https://gitee.com/c/d/x.7z" in err
+
+
 def test_install_from_archive_keeps_user_data(tmp_path) -> None:
     mod = _load_module()
     p = _make_plugin(mod, tmp_path)
