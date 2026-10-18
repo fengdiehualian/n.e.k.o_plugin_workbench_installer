@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import socket
 import subprocess
 
 from plugin.sdk.plugin import (
@@ -46,6 +47,16 @@ _PLUGIN_ID = "workbench_installer"
 _SETUP_ASSET = "N.E.K.O.PluginWorkshop-Setup.exe"
 _RELEASE_BASE = "https://github.com/fengdiehualian/neko-plugin-workshop/releases/latest/download/"
 _DEFAULT_URL = _RELEASE_BASE + _SETUP_ASSET
+# 国内镜像(码云):GitHub 拉不动时自动改用这里的最新发行版资产
+_MIRROR_REPO = "maple-butterfly-flower-love/neko-plugin-workshop"
+_MIRROR_LATEST_API = f"https://gitee.com/api/v5/repos/{_MIRROR_REPO}/releases/latest"
+_MIRROR_ASSET = _SETUP_ASSET
+# 主源(GitHub)的「停滞」阈值:连接后连续这么久收不到数据就判超时、切镜像。
+# 不用总时长上限——133MB 慢速下载本身可能就要 7-10 分钟,按总时长卡会误杀正常下载。
+_PRIMARY_STALL_SECONDS = 25.0
+# 需要回落镜像的失败类型:超时/连不上/服务端 5xx/资产缺失(404)/限流(429)。
+# 401/403 属凭据或权限问题,换镜像也一样,直接报错。
+_FALLBACK_STATUS = frozenset({404, 429})
 _HEALTH_URL = "http://127.0.0.1:5099/api/health"
 _WORKBENCH_URL = "http://127.0.0.1:5099"
 _SHORTCUT_NAME = "N.E.K.O.插件工坊"
@@ -62,7 +73,9 @@ def _default_target() -> str:
     return os.path.join(base, "Programs", "NEKOWorkshop")
 
 
-def _download_urllib(url: str, dest: str, proxy: str | None, trust_env: bool) -> None:
+def _download_urllib(
+    url: str, dest: str, proxy: str | None, trust_env: bool, read_timeout: float = 60.0
+) -> None:
     import urllib.request
 
     if proxy:
@@ -72,7 +85,7 @@ def _download_urllib(url: str, dest: str, proxy: str | None, trust_env: bool) ->
     else:
         handler = urllib.request.ProxyHandler({})  # 显式直连
     opener = urllib.request.build_opener(handler)
-    with opener.open(url, timeout=60) as resp, open(dest, "wb") as f:
+    with opener.open(url, timeout=read_timeout) as resp, open(dest, "wb") as f:
         shutil.copyfileobj(resp, f)
 
 
@@ -110,6 +123,7 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
         super().__init__(ctx)
         self._cfg_target = ""
         self._cfg_url = _DEFAULT_URL
+        self._cfg_mirror = ""
         self._cfg_proxy = ""
         self._cfg_download_timeout = 900.0
 
@@ -120,6 +134,8 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
         section = cfg.get(_PLUGIN_ID)
         section = section if isinstance(section, dict) else {}
         self._cfg_url = str(section.get("url", "") or "").strip() or _DEFAULT_URL
+        # mirror: 留空=自动用码云最新发行版资产;"off"/"none"=关闭回落;或填具体直链
+        self._cfg_mirror = str(section.get("mirror", "") or "").strip()
         self._cfg_proxy = str(section.get("proxy", "") or "").strip()
         try:
             t = float(section.get("download_timeout", 900) or 900)
@@ -177,9 +193,13 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
             return None, True
         return None, False
 
-    async def _download_once(self, url: str, dest: str, proxy, trust_env: bool) -> None:
+    async def _download_once(
+        self, url: str, dest: str, proxy, trust_env: bool, read_timeout: float | None = None
+    ) -> None:
+        stall = read_timeout if read_timeout else self._cfg_download_timeout
         if httpx is not None:
-            timeout = httpx.Timeout(self._cfg_download_timeout, connect=10.0)
+            # read 超时是「两次收到数据之间的最大间隔」,正好当停滞看门狗用
+            timeout = httpx.Timeout(self._cfg_download_timeout, connect=10.0, read=stall)
             async with _make_httpx_client(timeout, proxy, trust_env) as client:
                 async with client.stream("GET", url) as resp:
                     resp.raise_for_status()
@@ -187,9 +207,30 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
                         async for chunk in resp.aiter_bytes(1 << 16):
                             f.write(chunk)
         else:
-            await asyncio.to_thread(_download_urllib, url, dest, proxy, trust_env)
+            await asyncio.to_thread(_download_urllib, url, dest, proxy, trust_env, stall)
 
-    async def _download(self, url: str, dest: str) -> dict:
+    @staticmethod
+    def _failure_kind(exc: Exception) -> tuple[str, int | None]:
+        """把下载异常归类成 timeout / conn / http,用于决定是否该回落到镜像源。"""
+        if httpx is not None:
+            if isinstance(exc, httpx.HTTPStatusError):
+                try:
+                    return "http", exc.response.status_code
+                except Exception:
+                    return "http", None
+            if isinstance(exc, httpx.TimeoutException):
+                return "timeout", None
+            if isinstance(exc, (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError)):
+                return "conn", None
+        if isinstance(exc, (TimeoutError, socket.timeout)):
+            return "timeout", None
+        if isinstance(exc, (ConnectionError, OSError)):
+            return "conn", None
+        return "other", None
+
+    async def _download(
+        self, url: str, dest: str, read_timeout: float | None = None
+    ) -> dict:
         dest_dir = os.path.dirname(dest)
         if dest_dir:  # 裸文件名时 dirname 为空,makedirs("") 会直接炸
             os.makedirs(dest_dir, exist_ok=True)
@@ -200,21 +241,85 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
                 continue
             label = proxy or ("env" if trust_env else "direct")
             try:
-                await self._download_once(url, dest, proxy, trust_env)
+                await self._download_once(url, dest, proxy, trust_env, read_timeout)
                 size = os.path.getsize(dest) if os.path.isfile(dest) else 0
                 if size > 0:
                     return {"ok": True, "path": dest, "bytes": size, "via": label}
                 errors.append(f"{label}: 文件为空")
             except Exception as e:
+                kind, status = self._failure_kind(e)
                 # 服务端已明确回应(404/403 等):换代理重试没有意义,直接报错
-                if httpx is not None and isinstance(e, httpx.HTTPStatusError):
-                    code = e.response.status_code if e.response is not None else "?"
+                if kind == "http":
                     return {
                         "ok": False,
-                        "error": f"{label}: HTTP {code}(地址不存在或无权限): {url}",
+                        "kind": "http",
+                        "status": status,
+                        "error": f"{label}: HTTP {status}(地址不存在或无权限): {url}",
                     }
                 errors.append(f"{label}: {e}")
-        return {"ok": False, "error": " | ".join(errors)[:800]}
+                # 超时/连不上:同一地址换代理仍可能通,继续下一通道;
+                # 全部通道都失败时由上层按 kind 决定是否切镜像
+        return {"ok": False, "kind": "timeout" if all("timed out" in e or "Timeout" in e for e in errors) else "conn", "error": " | ".join(errors)[:800]}
+
+    async def _mirror_url(self, primary_url: str) -> str:
+        """解析码云镜像的最新发行版资产地址;不可用时返回空串。"""
+        cfg = self._cfg_mirror.lower()
+        if cfg in ("off", "none", "0", "false"):
+            return ""
+        if self._cfg_mirror:
+            return self._cfg_mirror  # 用户直接指定了镜像直链
+        if primary_url != self._cfg_url:
+            return ""  # 用户自定义了下载源,不再擅自换源
+        # 先假设镜像资产名与主源一致,通过 API 取最新发行版的下载直链
+        try:
+            if httpx is not None:
+                async with httpx.AsyncClient(timeout=8.0, trust_env=False) as client:
+                    r = await client.get(_MIRROR_LATEST_API)
+                    r.raise_for_status()
+                    data = r.json()
+            else:
+                import json
+                import urllib.request
+
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                with opener.open(_MIRROR_LATEST_API, timeout=8) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            self.logger.warning("码云镜像地址解析失败,跳过回落: {}", e)
+            return ""
+        for asset in data.get("assets", []) or []:
+            if asset.get("name") == _MIRROR_ASSET:
+                return str(asset.get("browser_download_url") or "")
+        self.logger.warning("码云最新发行版里没有 {} ,跳过回落", _MIRROR_ASSET)
+        return ""
+
+    async def _download_preferring(self, primary_url: str, dest: str) -> dict:
+        """先拉 GitHub(短停滞阈值);超时/连不上/5xx/404 再回落码云镜像。"""
+        got = await self._download(primary_url, dest, read_timeout=_PRIMARY_STALL_SECONDS)
+        if got.get("ok"):
+            return got
+        kind, status = got.get("kind"), got.get("status")
+        retryable = kind in ("timeout", "conn") or (
+            kind == "http" and (status in _FALLBACK_STATUS or (status or 0) >= 500)
+        )
+        if not retryable:
+            return got
+        mirror = await self._mirror_url(primary_url)
+        if not mirror:
+            return got
+        self.logger.info("主源失败({}),改用码云镜像: {}", kind, mirror)
+        got2 = await self._download(mirror, dest)
+        if got2.get("ok"):
+            got2["via"] = f"{got2['via']} (gitee 镜像)"
+            got2["fallback"] = True
+            return got2
+        return {
+            "ok": False,
+            "kind": got2.get("kind") or kind,
+            "error": f"github 失败: {got.get('error', '')} || gitee 失败: {got2.get('error', '')}"[
+                :800
+            ],
+        }
 
     async def _health(self):
         # 本机回环探测绝不能走代理:环境里一旦有 HTTP_PROXY,127.0.0.1 会被拦掉,
@@ -384,16 +489,14 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
                 "message": "工作台已安装,未执行覆盖;如需覆盖重装请传 overwrite=true",
             })
 
-        # 获取安装包:本地 exe 优先,否则联网下载
+        # 获取安装包:本地 exe 优先,否则联网下载(GitHub 优先,超时回落码云镜像)
         source = exe_path or (params.url or "").strip() or self._cfg_url
         if not exe_path:
             dest = os.path.join(self.cache_path("download"), _SETUP_ASSET)
             self.logger.info("下载工作台安装版: {}", source)
-            got = await self._download(source, dest)
+            got = await self._download_preferring(source, dest)
             if not got.get("ok"):
-                return Err(
-                    SdkError(f"下载失败(配置代理/环境代理/直连均不可用): {got.get('error', '')}")
-                )
+                return Err(SdkError(f"下载失败(含码云镜像回落): {got.get('error', '')}"))
             exe_path = got["path"]
             source = f"{source} ({got['bytes']} bytes, via {got['via']})"
 

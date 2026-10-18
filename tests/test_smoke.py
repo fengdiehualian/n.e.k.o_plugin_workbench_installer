@@ -234,3 +234,96 @@ def test_spawn_uses_compatible_creation_flags(tmp_path, monkeypatch) -> None:
     flags = captured.get("creationflags", 0)
     assert flags == sp.CREATE_NEW_CONSOLE
     assert not (flags & sp.DETACHED_PROCESS)
+
+
+# ---------- 下载回落:GitHub 优先 → 码云镜像 ----------
+
+
+def _stub_downloads(p, monkeypatch, outcomes, calls):
+    """按顺序返回 outcomes 里的结果;记录每次调用的 (url, read_timeout)。"""
+
+    async def fake_download(url, dest, read_timeout=None):
+        calls.append((url, read_timeout))
+        result = outcomes[len(calls) - 1]
+        if result.get("ok"):
+            Path(dest).parent.mkdir(parents=True, exist_ok=True)
+            Path(dest).write_bytes(b"x" * 8)
+        return dict(result)
+
+    monkeypatch.setattr(p, "_download", fake_download)
+
+
+def test_download_falls_back_to_mirror_on_timeout(tmp_path, monkeypatch) -> None:
+    mod = _load_module()
+    p = _make_plugin(mod, tmp_path)
+    p._cfg_url = "https://github.com/fengdiehualian/neko-plugin-workshop/releases/latest/download/x.exe"
+    calls = []
+    _stub_downloads(
+        p,
+        monkeypatch,
+        [
+            {"ok": False, "kind": "timeout", "error": "read timeout"},
+            {"ok": True, "path": "x", "bytes": 8, "via": "direct"},
+        ],
+        calls,
+    )
+
+    async def fake_mirror(primary_url):
+        return "https://gitee.com/maple-butterfly-flower-love/neko-plugin-workshop/releases/download/v1.2.8/x.exe"
+
+    monkeypatch.setattr(p, "_mirror_url", fake_mirror)
+    got = asyncio.run(p._download_preferring(p._cfg_url, tmp_path / "dl" / "setup.exe"))
+    assert got.get("ok") is True, got
+    assert got.get("fallback") is True
+    assert "gitee" in got["via"]
+    # 主源用 25 秒停滞阈值,镜像用完整下载超时(不传 → 默认)
+    assert calls[0][1] == mod._impl_mod._PRIMARY_STALL_SECONDS
+    assert calls[1][1] is None
+    assert calls[1][0].startswith("https://gitee.com/")
+
+
+def test_no_fallback_on_auth_error(tmp_path, monkeypatch) -> None:
+    """403 属权限问题,换镜像无意义,不该再拉一次。"""
+    mod = _load_module()
+    p = _make_plugin(mod, tmp_path)
+    calls = []
+    _stub_downloads(
+        p, monkeypatch, [{"ok": False, "kind": "http", "status": 403, "error": "forbidden"}], calls
+    )
+
+    async def boom(primary_url):
+        raise AssertionError("403 不应触发镜像回落")
+
+    monkeypatch.setattr(p, "_mirror_url", boom)
+    got = asyncio.run(p._download_preferring("https://github.com/a/b/x.exe", tmp_path / "x.exe"))
+    assert got.get("ok") is False
+    assert got.get("status") == 403
+    assert len(calls) == 1
+
+
+def test_mirror_off_returns_primary_error(tmp_path, monkeypatch) -> None:
+    mod = _load_module()
+    p = _make_plugin(mod, tmp_path)
+    p._cfg_mirror = "off"
+    p._cfg_url = "https://github.com/a/b/x.exe"
+    calls = []
+    _stub_downloads(
+        p, monkeypatch, [{"ok": False, "kind": "conn", "error": "connect refused"}], calls
+    )
+    # 走真实 _mirror_url:配置 off 时必须直接返回空,不触网
+    got = asyncio.run(p._download_preferring(p._cfg_url, tmp_path / "x.exe"))
+    assert got.get("ok") is False
+    assert "connect refused" in got.get("error", "")
+    assert len(calls) == 1
+
+
+def test_mirror_custom_url_used_directly(tmp_path) -> None:
+    mod = _load_module()
+    p = _make_plugin(mod, tmp_path)
+    p._cfg_url = "https://github.com/a/b/x.exe"
+    p._cfg_mirror = "https://cdn.example.com/setup.exe"
+    got = asyncio.run(p._mirror_url(p._cfg_url))
+    assert got == "https://cdn.example.com/setup.exe"
+    # 用户自定义了下载源时不再擅自换源
+    p._cfg_mirror = ""
+    assert asyncio.run(p._mirror_url("https://other.example.com/x.exe")) == ""
