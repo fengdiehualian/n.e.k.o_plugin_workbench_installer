@@ -117,24 +117,30 @@ def _archive_kind(path: str) -> str:
 
 
 def _find_7zr() -> str:
-    """找可用的 7z 可执行文件:插件内置 bin/7zr.exe → PATH → 常见安装路径。"""
+    """找可用的 7z 可执行文件。
+
+    内置的 `bin/7zr.exe` 是 Windows 程序,只能在本机平台匹配时才用——
+    否则在 Linux/macOS 上会拿 PE 文件去执行,直接 PermissionError(CI 踩过)。
+    """
     here = os.path.dirname(os.path.abspath(__file__))
-    for name in ("7zr.exe", "7za.exe", "7z.exe"):
-        p = os.path.join(here, "bin", name)
-        if os.path.isfile(p):
-            return p
+    if os.name == "nt":
+        for name in ("7zr.exe", "7za.exe", "7z.exe"):
+            p = os.path.join(here, "bin", name)
+            if os.path.isfile(p):
+                return p
     for name in ("7zr", "7za", "7z"):
         p = shutil.which(name)
         if p:
             return p
-    for p in (
-        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "7-Zip", "7z.exe"),
-        os.path.join(
-            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "7-Zip", "7z.exe"
-        ),
-    ):
-        if os.path.isfile(p):
-            return p
+    if os.name == "nt":
+        for p in (
+            os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "7-Zip", "7z.exe"),
+            os.path.join(
+                os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "7-Zip", "7z.exe"
+            ),
+        ):
+            if os.path.isfile(p):
+                return p
     return ""
 
 
