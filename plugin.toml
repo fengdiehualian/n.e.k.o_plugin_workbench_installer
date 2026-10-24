@@ -1,7 +1,7 @@
 [plugin]
 id = "workbench_installer"
 name = "Agent工作台安装器"
-version = "0.2.4"
+version = "0.2.5"
 type = "plugin"
 description = "在猫娘计划(N.E.K.O.)里一键安装「N.E.K.O. 插件工坊」Agent 工作台:下载官方安装版(Setup.exe)静默安装,自动创建桌面快捷方式并启动,随时查看安装与运行状态。对猫娘说「安装工作台」「启动工作台」即可使用。"
 short_description = "在猫娘计划里一键安装、启动「N.E.K.O. 插件工坊」Agent 工作台"

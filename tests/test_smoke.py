@@ -284,22 +284,48 @@ def test_download_falls_back_to_mirror_on_timeout(tmp_path, monkeypatch) -> None
     assert calls[1][0].startswith("https://gitee.com/")
 
 
-def test_no_fallback_on_auth_error(tmp_path, monkeypatch) -> None:
-    """403 属权限问题,换镜像无意义,不该再拉一次。"""
+def test_fallback_on_auth_error(tmp_path, monkeypatch) -> None:
+    """401/403 也要回落:源站拒绝(私有化/IP 被限/网关拦截)时,公开镜像往往还能拉。"""
+    mod = _load_module()
+    for code in (401, 403):
+        p = _make_plugin(mod, tmp_path / str(code))
+        calls = []
+        _stub_downloads(
+            p,
+            monkeypatch,
+            [
+                {"ok": False, "kind": "http", "status": code, "error": "denied"},
+                {"ok": True, "path": "x", "bytes": 8, "via": "direct"},
+            ],
+            calls,
+        )
+
+        async def fake_mirror(primary_url):
+            return ["https://gitee.com/mirror/x.exe"]
+
+        monkeypatch.setattr(p, "_mirror_urls", fake_mirror)
+        got = asyncio.run(p._download_preferring("https://github.com/a/b/x.exe", tmp_path / "x.exe"))
+        assert got.get("ok") is True, (code, got)
+        assert got.get("fallback") is True
+        assert len(calls) == 2
+
+
+def test_no_fallback_on_plain_client_error(tmp_path, monkeypatch) -> None:
+    """普通 4xx(非 401/403/404/429)换源也没用,不该再拉一次。"""
     mod = _load_module()
     p = _make_plugin(mod, tmp_path)
     calls = []
     _stub_downloads(
-        p, monkeypatch, [{"ok": False, "kind": "http", "status": 403, "error": "forbidden"}], calls
+        p, monkeypatch, [{"ok": False, "kind": "http", "status": 400, "error": "bad request"}], calls
     )
 
     async def boom(primary_url):
-        raise AssertionError("403 不应触发镜像回落")
+        raise AssertionError("400 不应触发镜像回落")
 
     monkeypatch.setattr(p, "_mirror_urls", boom)
     got = asyncio.run(p._download_preferring("https://github.com/a/b/x.exe", tmp_path / "x.exe"))
     assert got.get("ok") is False
-    assert got.get("status") == 403
+    assert got.get("status") == 400
     assert len(calls) == 1
 
 

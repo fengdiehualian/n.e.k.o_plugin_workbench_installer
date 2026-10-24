@@ -63,8 +63,9 @@
 
 1. **先拉 GitHub** 的 `releases/latest/download/N.E.K.O.PluginWorkshop-Setup.exe`。
    这一段用 **25 秒停滞阈值**(连续 25 秒收不到数据即判超时,不是按总时长——慢速下载本身可能要 7–10 分钟)。
-2. 命中以下任一情况才回落:**超时 / 连不上 / HTTP 404 / HTTP 429 / 5xx**。
-   401、403 属凭据或权限问题,换源无意义,直接报错。
+2. 命中以下任一情况才回落:**超时 / 连不上 / HTTP 401 / 403 / 404 / 429 / 5xx**。
+   401、403 多半是源站拒绝(仓库私有化、IP 被限、企业网关拦截),镜像仓是公开的,换源常常能绕过去;
+   其余普通 4xx(如 400)换源也没用,直接报错。
 3. 回落时向码云 API 取**最新发行版**里的镜像资产,优先级:
    `N.E.K.O.PluginWorkshop-Payload.7z` → `N.E.K.O.PluginWorkshop-Setup.exe` → 旧的 `.tar.xz`
    → **分卷安装包** `N.E.K.O.PluginWorkshop-Setup-vX.Y.Z.exe.part1/.part2/...`。

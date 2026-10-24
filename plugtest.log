@@ -1,0 +1,18 @@
+2026-10-24 22:24:42 - N.E.K.O.utils.api_config_loader - INFO - 成功加载配置文件: C:\Users\Administrator\dev\N.E.K.O\config\api_providers.json
+[ConfigManager] ✓ Using app data directory: C:\Users\Administrator\AppData\Local
+[ConfigManager] ✓ Using app data directory: C:\Users\Administrator\AppData\Local
+[ConfigManager] ✓ Using app data directory: C:\Users\Administrator\AppData\Local
+[ConfigManager] ✓ Using app data directory: C:\Users\Administrator\AppData\Local
+[ConfigManager] ✓ Using app data directory: C:\Users\Administrator\AppData\Local
+2026-10-24 22:25:36 - httpx - INFO - HTTP Request: GET https://github.com/fengdiehualian/neko-plugin-workshop/releases/latest/download/definitely-missing.exe "HTTP/1.1 302 Found"
+2026-10-24 22:25:36 - httpx - INFO - HTTP Request: GET https://github.com/fengdiehualian/neko-plugin-workshop/releases/download/v1.2.14/definitely-missing.exe "HTTP/1.1 404 Not Found"
+2026-10-24 22:25:39 - httpx - INFO - HTTP Request: GET https://gitee.com/api/v5/repos/maple-butterfly-flower-love/neko-plugin-workshop/releases/latest "HTTP/1.1 200 OK"
+2026-10-24 22:25:48 - httpx - INFO - HTTP Request: GET https://gitee.com/maple-butterfly-flower-love/neko-plugin-workshop/releases/download/v1.2.14/N.E.K.O.PluginWorkshop-Setup-v1.2.14.exe.part1 "HTTP/1.1 302 Found"
+2026-10-24 22:25:48 - httpx - INFO - HTTP Request: GET https://gitee.com/maple-butterfly-flower-love/neko-plugin-workshop/attach_files/3484015/download/N.E.K.O.PluginWorkshop-Setup-v1.2.14.exe.part1 "HTTP/1.1 302 Found"
+2026-10-24 22:25:49 - httpx - INFO - HTTP Request: GET https://foruda.gitee.com/attach_file/1792846115344161609/n.e.k.o.pluginworkshop-setup-v1.2.14.exe.part1?token=0b17b243b40cfa5df6dbc8ffac02f7b3&ts=1792851899&attname=N.E.K.O.PluginWorkshop-Setup-v1.2.14.exe.part1 "HTTP/1.1 200 OK"
+2026-10-24 22:26:34 - httpx - INFO - HTTP Request: GET https://gitee.com/maple-butterfly-flower-love/neko-plugin-workshop/releases/download/v1.2.14/N.E.K.O.PluginWorkshop-Setup-v1.2.14.exe.part2 "HTTP/1.1 302 Found"
+2026-10-24 22:26:34 - httpx - INFO - HTTP Request: GET https://gitee.com/maple-butterfly-flower-love/neko-plugin-workshop/attach_files/3484056/download/N.E.K.O.PluginWorkshop-Setup-v1.2.14.exe.part2 "HTTP/1.1 302 Found"
+2026-10-24 22:26:36 - httpx - INFO - HTTP Request: GET https://foruda.gitee.com/attach_file/1792846390106022557/n.e.k.o.pluginworkshop-setup-v1.2.14.exe.part2?token=b3ca40b64e694d31c75eb0d189f7372f&ts=1792851946&attname=N.E.K.O.PluginWorkshop-Setup-v1.2.14.exe.part2 "HTTP/1.1 200 OK"
+结果: {'ok': True, 'path': 'C:/Users/Administrator/WorkBuddy/2026-10-16-21-55-37/_wb_plugtest\\Setup.exe', 'bytes': 139464192, 'via': 'gitee 镜像(分卷 2 卷, 139464192 bytes)', 'fallback': True, 'error': None}
+SHA256: EF6138976AC01A3ECF3B1DB734834B4596B439D42E120868C2E3FF962677E7D7
+大小: 139464192
