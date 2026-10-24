@@ -269,9 +269,11 @@ def test_download_falls_back_to_mirror_on_timeout(tmp_path, monkeypatch) -> None
     )
 
     async def fake_mirror(primary_url):
-        return "https://gitee.com/maple-butterfly-flower-love/neko-plugin-workshop/releases/download/v1.2.8/x.exe"
+        return [
+            "https://gitee.com/maple-butterfly-flower-love/neko-plugin-workshop/releases/download/v1.2.8/x.exe"
+        ]
 
-    monkeypatch.setattr(p, "_mirror_url", fake_mirror)
+    monkeypatch.setattr(p, "_mirror_urls", fake_mirror)
     got = asyncio.run(p._download_preferring(p._cfg_url, tmp_path / "dl" / "setup.exe"))
     assert got.get("ok") is True, got
     assert got.get("fallback") is True
@@ -294,7 +296,7 @@ def test_no_fallback_on_auth_error(tmp_path, monkeypatch) -> None:
     async def boom(primary_url):
         raise AssertionError("403 不应触发镜像回落")
 
-    monkeypatch.setattr(p, "_mirror_url", boom)
+    monkeypatch.setattr(p, "_mirror_urls", boom)
     got = asyncio.run(p._download_preferring("https://github.com/a/b/x.exe", tmp_path / "x.exe"))
     assert got.get("ok") is False
     assert got.get("status") == 403
@@ -322,11 +324,11 @@ def test_mirror_custom_url_used_directly(tmp_path) -> None:
     p = _make_plugin(mod, tmp_path)
     p._cfg_url = "https://github.com/a/b/x.exe"
     p._cfg_mirror = "https://cdn.example.com/setup.exe"
-    got = asyncio.run(p._mirror_url(p._cfg_url))
-    assert got == "https://cdn.example.com/setup.exe"
+    got = asyncio.run(p._mirror_urls(p._cfg_url))
+    assert got == ["https://cdn.example.com/setup.exe"]
     # 用户自定义了下载源时不再擅自换源
     p._cfg_mirror = ""
-    assert asyncio.run(p._mirror_url("https://other.example.com/x.exe")) == ""
+    assert asyncio.run(p._mirror_urls("https://other.example.com/x.exe")) == []
 
 
 # ---------- 压缩包安装路径(码云镜像 >100MB 只能放压缩产物)----------
@@ -544,3 +546,111 @@ def test_install_accepts_archive_from_mirror(tmp_path, monkeypatch) -> None:
     assert res.get("ok") is True, res
     assert called["setup"] is False, "压缩包不该再走 setup exe"
     assert (target / "start.cmd").is_file()
+
+
+# ---------- 码云分卷:139MB 安装器超过单附件 100MB,拆成 .part1/.part2 ----------
+
+
+def _load_impl():
+    """直接加载实现模块(不是包根垫片):模块级私有函数只有这里拿得到。"""
+    if not _ensure_sdk_on_path():
+        pytest.skip("N.E.K.O SDK 不在路径上(设置 WB_NEKO_REPO 后重跑)")
+    spec = importlib.util.spec_from_file_location(
+        "wb_installer_impl", ROOT / "plugin" / "plugins" / "workbench_installer" / "__init__.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_pick_mirror_assets_prefers_single_file() -> None:
+    mod = _load_impl()
+    assets = [
+        {"name": "N.E.K.O.PluginWorkshop-Setup-v1.2.14.exe.part1", "browser_download_url": "u1"},
+        {"name": "N.E.K.O.PluginWorkshop-Setup-v1.2.14.exe.part2", "browser_download_url": "u2"},
+        {"name": "N.E.K.O.PluginWorkshop-Payload.tar.xz", "browser_download_url": "ux"},
+        {"name": "N.E.K.O.PluginWorkshop-Payload.7z", "browser_download_url": "u7"},
+    ]
+    # 单文件压缩包优先(一次下载、可校验),分卷只是兜底
+    assert mod._pick_mirror_assets(assets) == ["u7"]
+
+
+def test_pick_mirror_assets_sorts_parts() -> None:
+    mod = _load_impl()
+    assets = [
+        {"name": "N.E.K.O.PluginWorkshop-Setup-v1.2.14.exe.part2", "browser_download_url": "u2"},
+        {"name": "N.E.K.O.PluginWorkshop-Setup-v1.2.14.exe.part1", "browser_download_url": "u1"},
+    ]
+    # 资产顺序不可靠,必须按 part 编号排
+    assert mod._pick_mirror_assets(assets) == ["u1", "u2"]
+
+
+def test_pick_mirror_assets_rejects_gap() -> None:
+    mod = _load_impl()
+    assets = [
+        {"name": "N.E.K.O.PluginWorkshop-Setup-v1.2.14.exe.part1", "browser_download_url": "u1"},
+        {"name": "N.E.K.O.PluginWorkshop-Setup-v1.2.14.exe.part3", "browser_download_url": "u3"},
+    ]
+    # 缺卷拼出来是坏文件,宁可判镜像不可用
+    assert mod._pick_mirror_assets(assets) == []
+
+
+def test_download_split_merges_parts(tmp_path, monkeypatch) -> None:
+    mod = _load_module()
+    p = _make_plugin(mod, tmp_path)
+    chunks = {"https://g/p1": b"MZ-AAA", "https://g/p2": b"BBB"}
+
+    async def fake_download(url, dest, read_timeout=None):
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(chunks[url])
+        return {"ok": True, "path": dest, "bytes": len(chunks[url]), "via": "direct"}
+
+    monkeypatch.setattr(p, "_download", fake_download)
+    dest = tmp_path / "dl" / "Setup.exe"
+    got = asyncio.run(p._download_split(["https://g/p1", "https://g/p2"], str(dest)))
+    assert got["ok"] is True, got
+    assert dest.read_bytes() == b"MZ-AAABBB"
+    assert "分卷 2" in got["via"]
+    assert got["fallback"] is True
+    # 临时分卷必须清理干净,不能把 cache 撑爆
+    assert not list((tmp_path / "dl").glob("*.part*"))
+
+
+def test_download_split_rejects_non_exe(tmp_path, monkeypatch) -> None:
+    mod = _load_module()
+    p = _make_plugin(mod, tmp_path)
+
+    async def fake_download(url, dest, read_timeout=None):
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(b"not-an-exe")
+        return {"ok": True, "path": dest, "bytes": 10, "via": "direct"}
+
+    monkeypatch.setattr(p, "_download", fake_download)
+    got = asyncio.run(p._download_split(["https://g/p1", "https://g/p2"], str(tmp_path / "o.exe")))
+    assert got["ok"] is False
+    assert "MZ" in got["error"]
+
+
+def test_download_preferring_uses_split_when_only_parts(tmp_path, monkeypatch) -> None:
+    mod = _load_module()
+    p = _make_plugin(mod, tmp_path)
+    p._cfg_url = "https://github.com/fengdiehualian/neko-plugin-workshop/releases/latest/download/x.exe"
+    calls = []
+    _stub_downloads(
+        p, monkeypatch, [{"ok": False, "kind": "timeout", "error": "read timeout"}], calls
+    )
+
+    async def fake_mirror(primary_url):
+        return ["https://g/p1", "https://g/p2"]
+
+    monkeypatch.setattr(p, "_mirror_urls", fake_mirror)
+    seen = {}
+
+    async def fake_split(urls, dest):
+        seen["urls"] = list(urls)
+        return {"ok": True, "path": dest, "bytes": 6, "via": "gitee 镜像(分卷 2 卷)", "fallback": True}
+
+    monkeypatch.setattr(p, "_download_split", fake_split)
+    got = asyncio.run(p._download_preferring(p._cfg_url, str(tmp_path / "x.exe")))
+    assert got.get("ok") is True, got
+    assert seen["urls"] == ["https://g/p1", "https://g/p2"]

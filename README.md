@@ -66,7 +66,10 @@
 2. 命中以下任一情况才回落:**超时 / 连不上 / HTTP 404 / HTTP 429 / 5xx**。
    401、403 属凭据或权限问题,换源无意义,直接报错。
 3. 回落时向码云 API 取**最新发行版**里的镜像资产,优先级:
-   `N.E.K.O.PluginWorkshop-Payload.7z` → `N.E.K.O.PluginWorkshop-Setup.exe` → 旧的 `.tar.xz`。
+   `N.E.K.O.PluginWorkshop-Payload.7z` → `N.E.K.O.PluginWorkshop-Setup.exe` → 旧的 `.tar.xz`
+   → **分卷安装包** `N.E.K.O.PluginWorkshop-Setup-vX.Y.Z.exe.part1/.part2/...`。
+   分卷必须从 `part1` 开始连续;缺卷会直接判镜像不可用(拼出来的坏文件装到一半才报错更糟)。
+   下载后按编号拼回单一 exe,并校验 `MZ` 文件头才交给安装器。
 4. 两段下载都在同一条链路上依次尝试 配置代理 → 环境变量代理 → 直连。
 5. **按文件头分流**(不看扩展名):`MZ` → 交给官方 SFX 安装器;
    `7z` → 用**插件内置的 7zr.exe** 解压,再合并进安装目录;
@@ -78,6 +81,7 @@
 > 传不上去(`文件大小已超出限制:100 MB`)。7z(LZMA2)重压后约 90MB,既能上传,
 > 解压也比 deflate 快。插件自带 `bin/7zr.exe`(约 590KB,公共领域),
 > 用户机器无需单独安装 7-Zip;找不到内置文件时会退回 PATH 或常见安装路径的 7z。
+> 从工作台 v1.2.14 起镜像侧只放**分卷 exe**(`...exe.part1/.part2`),插件同样能装(拼回后校验 MZ)。
 
 ### 全失败时:自动弹手动下载页
 

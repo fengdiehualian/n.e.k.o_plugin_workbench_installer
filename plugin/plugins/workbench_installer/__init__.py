@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -56,6 +57,39 @@ _MIRROR_ASSET = _SETUP_ASSET
 _MIRROR_ARCHIVE_7Z = "N.E.K.O.PluginWorkshop-Payload.7z"
 # 兼容旧镜像:此前发过 tar.xz,标准库即可解,作为第三顺位
 _MIRROR_ARCHIVE = "N.E.K.O.PluginWorkshop-Payload.tar.xz"
+# 码云单附件 100MB 上限仍在,139MB 的安装器只能拆卷发(名字带版本号,如 -v1.2.14);
+# 这里认 .exe.partN,按编号顺序下载后拼回原 exe 再交给安装器。
+_MIRROR_PART_RE = re.compile(
+    r"^N\.E\.K\.O\.PluginWorkshop-Setup(?:[._-]v?[\d.]+)?\.exe\.part(\d+)$", re.I
+)
+
+
+def _pick_mirror_assets(assets) -> list[str]:
+    """从码云发行版资产里挑下载地址(按优先级)。
+
+    返回 1 个地址 = 单文件(7z / exe / tar.xz);返回多个 = 同一安装包的连续分卷。
+    分卷必须从 1 开始不跳号,否则宁可判为不可用 —— 缺卷拼出来的是坏文件,
+    装到一半才报错比直接说"镜像不可用"更糟。
+    """
+    by_name: dict[str, str] = {}
+    for a in assets or []:
+        name = str(a.get("name") or "")
+        url = str(a.get("browser_download_url") or "")
+        if name and url:
+            by_name[name] = url
+    for want in (_MIRROR_ARCHIVE_7Z, _MIRROR_ASSET, _MIRROR_ARCHIVE):
+        if want in by_name:
+            return [by_name[want]]
+    parts: list[tuple[int, str]] = []
+    for name, url in by_name.items():
+        m = _MIRROR_PART_RE.match(name)
+        if m:
+            parts.append((int(m.group(1)), url))
+    if len(parts) >= 2:
+        parts.sort(key=lambda x: x[0])
+        if [n for n, _ in parts] == list(range(1, len(parts) + 1)):
+            return [u for _, u in parts]
+    return []
 # 主源(GitHub)的「停滞」阈值:连接后连续这么久收不到数据就判超时、切镜像。
 # 不用总时长上限——133MB 慢速下载本身可能就要 7-10 分钟,按总时长卡会误杀正常下载。
 _PRIMARY_STALL_SECONDS = 25.0
@@ -432,16 +466,19 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
                 # 全部通道都失败时由上层按 kind 决定是否切镜像
         return {"ok": False, "kind": "timeout" if all("timed out" in e or "Timeout" in e for e in errors) else "conn", "error": " | ".join(errors)[:800]}
 
-    async def _mirror_url(self, primary_url: str) -> str:
-        """解析码云镜像的最新发行版资产地址;不可用时返回空串。"""
+    async def _mirror_urls(self, primary_url: str) -> list[str]:
+        """解析码云镜像的最新发行版下载地址;不可用时返回空列表。
+
+        单文件资产返回 1 个地址;分卷安装包返回按 part 编号排好序的多个地址。
+        """
         cfg = self._cfg_mirror.lower()
         if cfg in ("off", "none", "0", "false"):
-            return ""
+            return []
         if self._cfg_mirror:
-            return self._cfg_mirror  # 用户直接指定了镜像直链
+            return [self._cfg_mirror]  # 用户直接指定了镜像直链
         if primary_url != self._cfg_url:
-            return ""  # 用户自定义了下载源,不再擅自换源
-        # 先假设镜像资产名与主源一致,通过 API 取最新发行版的下载直链
+            return []  # 用户自定义了下载源,不再擅自换源
+        # 通过 API 取最新发行版的资产清单,再按名字挑(单文件优先,其次分卷)
         try:
             if httpx is not None:
                 async with httpx.AsyncClient(timeout=8.0, trust_env=False) as client:
@@ -457,16 +494,62 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
                     data = json.loads(resp.read().decode("utf-8"))
         except Exception as e:
             self.logger.warning("码云镜像地址解析失败,跳过回落: {}", e)
-            return ""
-        for want in (_MIRROR_ARCHIVE_7Z, _MIRROR_ASSET, _MIRROR_ARCHIVE):
-            for asset in data.get("assets", []) or []:
-                if asset.get("name") == want:
-                    return str(asset.get("browser_download_url") or "")
+            return []
+        picked = _pick_mirror_assets(data.get("assets") or [])
+        if picked:
+            return picked
         self.logger.warning(
-            "码云最新发行版里没有 {} / {} / {} ,跳过回落",
+            "码云最新发行版里没有 {} / {} / {} / 分卷 .exe.partN,跳过回落",
             _MIRROR_ARCHIVE_7Z, _MIRROR_ASSET, _MIRROR_ARCHIVE,
         )
-        return ""
+        return []
+
+    async def _download_split(self, urls: list[str], dest: str) -> dict:
+        """把同一安装包的分卷按顺序下载并拼回单一 exe;任何一卷失败都整体判失败。"""
+        parts: list[str] = []
+        total = 0
+        try:
+            for i, u in enumerate(urls, 1):
+                part = f"{dest}.part{i}"
+                got = await self._download(u, part)
+                if not got.get("ok"):
+                    return {
+                        "ok": False,
+                        "kind": got.get("kind"),
+                        "status": got.get("status"),
+                        "error": f"分卷 {i}/{len(urls)} 下载失败: {got.get('error', '')}",
+                        "tried": list(urls[:i]),
+                    }
+                parts.append(part)
+                total += int(got.get("bytes") or 0)
+            os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+            with open(dest, "wb") as out:
+                for p in parts:
+                    with open(p, "rb") as f:
+                        shutil.copyfileobj(f, out, 1024 * 1024)
+            size = os.path.getsize(dest)
+            with open(dest, "rb") as f:
+                magic = f.read(2)
+            if magic != b"MZ":
+                return {
+                    "ok": False,
+                    "kind": "http",
+                    "error": "分卷合并后不是有效的安装程序(缺少 MZ 头),可能分卷不完整",
+                    "tried": list(urls),
+                }
+            return {
+                "ok": True,
+                "path": dest,
+                "bytes": size,
+                "via": f"gitee 镜像(分卷 {len(urls)} 卷, {total} bytes)",
+                "fallback": True,
+            }
+        finally:
+            for p in parts:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
 
     async def _download_preferring(self, primary_url: str, dest: str) -> dict:
         """先拉 GitHub(短停滞阈值);超时/连不上/5xx/404 再回落码云镜像。"""
@@ -480,20 +563,27 @@ class WorkbenchInstallerPlugin(NekoPluginBase):
         if not retryable:
             got["tried"] = [primary_url]
             return got
-        mirror = await self._mirror_url(primary_url)
-        if not mirror:
+        mirrors = await self._mirror_urls(primary_url)
+        if not mirrors:
             got["tried"] = [primary_url]
             return got
-        self.logger.info("主源失败({}),改用码云镜像: {}", kind, mirror)
-        got2 = await self._download(mirror, dest)
+        self.logger.info(
+            "主源失败({}),改用码云镜像: {} URL ({} 卷)",
+            kind, len(mirrors), len(mirrors),
+        )
+        if len(mirrors) > 1:
+            got2 = await self._download_split(mirrors, dest)
+        else:
+            got2 = await self._download(mirrors[0], dest)
+            if got2.get("ok"):
+                got2["via"] = f"{got2['via']} (gitee 镜像)"
+                got2["fallback"] = True
         if got2.get("ok"):
-            got2["via"] = f"{got2['via']} (gitee 镜像)"
-            got2["fallback"] = True
             return got2
         return {
             "ok": False,
             "kind": got2.get("kind") or kind,
-            "tried": [primary_url, mirror],
+            "tried": [primary_url, *mirrors],
             "error": f"github 失败: {got.get('error', '')} || gitee 失败: {got2.get('error', '')}"[
                 :800
             ],
