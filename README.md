@@ -114,3 +114,5 @@ python plugin\neko_plugin_cli\cli.py build workbench_installer --out workbench_i
 ```
 
 详情见 `AGENTS.md`;插件开发规范全文在 `.opencode/skill/neko-plugin-dev/SKILL.md`(工坊生成项目时自动放置,不随插件打包)。
+# 没装 SDK 依赖(或 .venv 被删)时,跑纯逻辑离线自检:分卷选择/拼接校验/文件头识别
+python tools\offline_check.py
