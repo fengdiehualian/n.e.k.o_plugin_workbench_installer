@@ -740,6 +740,12 @@ function fallback(text, cb){{
         except Exception as e:
             return {"ok": False, "error": f"运行安装器超时或失败: {e}"}
 
+    async def _running_hint(self) -> str:
+        """安装失败时补一句人话:多半是工作台还开着,文件被占用写不进去。"""
+        if await self._health() is None:
+            return ""
+        return "。检测到工作台仍在运行:请先关闭工作台窗口(不是最小化)再重试,否则程序文件被占用会导致覆盖失败"
+
     async def _wait_installed(self, target: str, seconds: float) -> dict:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + seconds
@@ -888,11 +894,14 @@ function fallback(text, cb){{
         if kind == "exe":
             ran = await asyncio.to_thread(self._run_setup_exe, exe_path)
             if not ran.get("ok"):
-                return Err(SdkError(f"运行安装程序失败: {ran.get('error', '')}"))
+                return Err(SdkError(
+                    f"运行安装程序失败: {ran.get('error', '')}{await self._running_hint()}"
+                ))
             info = await self._wait_installed(target, 120.0)
             if not info["installed"]:
                 return Err(SdkError(
                     "安装程序已结束,但 120 秒内未检测到 start.cmd;请手动运行安装包确认"
+                    + (await self._running_hint())
                 ))
             files = info["files"]
         else:
