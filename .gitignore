@@ -17,3 +17,6 @@ vendor/
 .pytest_cache/
 store.db
 .pytest-tmp/
+
+# 本地测试日志
+*.log
